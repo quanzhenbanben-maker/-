@@ -22,7 +22,7 @@ nomikai-kanji/
 ├── .env.example　  ← キー名だけ。全員への説明書。gitHubにあげる
 ├── .gitignore 　　 ← .envをGitに入れないための番人
 ├── requirements.txt　← Pythonのライブラリ、なにをインストールするか
-└── README.md 
+└── README.md 　←このファイル
 
 
 
