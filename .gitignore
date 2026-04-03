@@ -1,0 +1,13 @@
+# 環境変数（APIキーなど）
+.env
+
+# Pythonの実行用キャッシュ
+__pycache__/
+
+# 仮想環境（もし使っていれば）
+.venv/
+env/
+venv/
+
+# Windows特有のシステムファイル
+Thumbs.db
