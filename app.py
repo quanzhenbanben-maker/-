@@ -7,8 +7,7 @@ import re
 from dotenv import load_dotenv
 from openai import OpenAI  
 import googlemaps
-from database import create_table
-import sqlite3
+
 
 
 load_dotenv() #.envを読み込み
@@ -350,6 +349,156 @@ def get_walk_minutes(area, shops_df):
     pass #pass は「中身は空だけどエラーにしない」という意味。実装するときに pass を削除して中身を書いてって
 
 
+# ============================================================
+# [C担当] レビュー投稿ダイアログ
+# ============================================================
+@st.dialog("✏️ レビューを投稿する", width="large")
+def review_dialog():
+
+    if 'rv_step' not in st.session_state:
+        st.session_state.rv_step = 1
+    if 'rv_shop_id' not in st.session_state:
+        st.session_state.rv_shop_id = None
+    if 'rv_shop_name' not in st.session_state:
+        st.session_state.rv_shop_name = None
+
+    # ステップ表示
+    steps = ["店舗を選ぶ", "レビュー入力", "完了"]
+    cols = st.columns(len(steps))
+    for i, (col, label) in enumerate(zip(cols, steps), start=1):
+        if i < st.session_state.rv_step:
+            col.markdown(f"<div style='text-align:center;color:#22C55E;font-size:12px'>✅ {label}</div>", unsafe_allow_html=True)
+        elif i == st.session_state.rv_step:
+            col.markdown(f"<div style='text-align:center;font-weight:700;font-size:12px'>● {label}</div>", unsafe_allow_html=True)
+        else:
+            col.markdown(f"<div style='text-align:center;color:#BBB;font-size:12px'>○ {label}</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ============================================================
+    # STEP 1: 店舗を選ぶ
+    # ※ カードから開いた場合はSTEP2に直接ジャンプ済み
+    # ============================================================
+    if st.session_state.rv_step == 1:
+        st.caption("レビューを書きたいお店を検索してください")
+
+        search_word = st.text_input("🔍 店名で検索", placeholder="例：鳥一筋、銀座 あさみ")
+
+        try:
+            conn     = sqlite3.connect('nomikai_kanji.db')
+            shops_df = pd.read_sql_query("SELECT id, name FROM shops ORDER BY name", conn)
+            conn.close()
+        except Exception:
+            shops_df = pd.DataFrame(columns=['id', 'name'])
+
+        if shops_df.empty:
+            st.warning("登録済みの店舗がありません。先に店舗を登録してください。")
+        else:
+            if search_word:
+                filtered_df = shops_df[shops_df['name'].str.contains(search_word, na=False)]
+            else:
+                filtered_df = shops_df
+
+            if filtered_df.empty:
+                st.warning(f"「{search_word}」に一致する店舗が見つかりませんでした。")
+            else:
+                selected_name = st.selectbox("店舗を選んでください", filtered_df['name'].tolist())
+                selected_id   = int(filtered_df[filtered_df['name'] == selected_name]['id'].values[0])
+
+                if st.button("この店舗にレビューを書く →", type="primary", use_container_width=True):
+                    st.session_state.rv_shop_id   = selected_id
+                    st.session_state.rv_shop_name = selected_name
+                    st.session_state.rv_step      = 2
+
+    # ============================================================
+    # STEP 2: レビュー入力
+    # ============================================================
+    elif st.session_state.rv_step == 2:
+        st.info(f"**{st.session_state.rv_shop_name}** にレビューを投稿します")
+        st.divider()
+
+        col_back, _ = st.columns([1, 3])
+        with col_back:
+            if st.button("← 戻る", use_container_width=True):
+                st.session_state.rv_step = 1
+
+        nickname = st.text_input("👤 あだ名 *", placeholder="例：さとう")
+        rating = st.select_slider(
+            "⭐ 総合評価 *",
+            options=[1, 2, 3, 4, 5],
+            value=3,
+            format_func=lambda x: "★" * x + "☆" * (5 - x)
+        )
+        review = st.text_area(
+            "📝 レビュー本文 *",
+            placeholder="誰といった？食事の提供スピードは？トイレは清潔？会食向き？など、自由に！",
+            height=120
+        )
+        purpose = st.radio(
+            "🎯 目的 *",
+            ["接待", "会食", "会社の飲み会", "プライベート"],
+            horizontal=True
+        )
+        noise_level = st.radio(
+            "🔊 雰囲気 *",
+            ["静か", "ふつう", "うるさい"],
+            horizontal=True
+        )
+        amount = st.number_input(
+            "💰 一人あたりの金額 *（円）",
+            min_value=0, max_value=100000, step=500, value=5000
+        )
+        with st.expander("任意項目を入力する"):
+            visited_at = st.date_input("📅 訪問日", value=None)
+            headcount  = st.number_input("👥 人数", min_value=1, max_value=100, step=1, value=4)
+
+        st.divider()
+
+        if st.button("🚀 レビューを投稿する", type="primary", use_container_width=True):
+            if not nickname:
+                st.warning("あだ名を入力してください")
+            elif not review:
+                st.warning("レビュー本文を入力してください")
+            else:
+                with st.spinner("保存中..."):
+                    save_comment(
+                        shop_id     = st.session_state.rv_shop_id,
+                        nickname    = nickname,
+                        visited_at  = visited_at,
+                        amount      = amount,
+                        headcount   = headcount,
+                        rating      = rating,
+                        review      = review,
+                        purpose     = purpose,
+                        noise_level = noise_level
+                    )
+                st.session_state.rv_step = 3
+
+    # ============================================================
+    # STEP 3: 完了
+    # ============================================================
+    elif st.session_state.rv_step == 3:
+        st.markdown(f"""
+        <div style="text-align:center; padding:32px 0">
+            <div style="font-size:48px">🎉</div>
+            <div style="font-size:18px; font-weight:700; margin-top:12px">レビューを投稿しました！</div>
+            <div style="font-size:13px; color:#888; margin-top:8px; line-height:1.8">
+                {st.session_state.get('rv_shop_name', '')} へのレビューが追加されました。
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("閉じる", use_container_width=True):
+                st.session_state.rv_step      = 1
+                st.session_state.rv_shop_id   = None
+                st.session_state.rv_shop_name = None
+        with col2:
+            if st.button("続けて投稿する", type="primary", use_container_width=True):
+                st.session_state.rv_step      = 1
+                st.session_state.rv_shop_id   = None
+                st.session_state.rv_shop_name = None
 
 
 # ============================================================
@@ -660,7 +809,7 @@ def register_dialog():
 
 
 # ============================================================
-# [C担当] メインのヒーローエリアデザイン
+# [C担当] メインのヒーローエリアデザイン 、横いっぱいにしてみた
 # ============================================================
 col_hero, col_img = st.columns([1, 1])
 
@@ -677,7 +826,7 @@ with col_hero:
     </div>
     """, unsafe_allow_html=True)
 
-    hero_col1, hero_col2 = st.columns([1, 1])
+    hero_col1, hero_col2 , hero_col3 = st.columns([1, 1, 1])
     with hero_col1:
         search_hero = st.button(
             "🔍 お店を探す",
@@ -687,6 +836,11 @@ with col_hero:
     with hero_col2:
         register_hero = st.button(
             "＋ 店舗を登録する",
+            use_container_width=True
+        )
+    with hero_col3:
+        review_hero = st.button(
+            "✏️ レビューを書く",
             use_container_width=True
         )
 
@@ -701,77 +855,36 @@ st.divider()
 # ============================================================
 # [C担当] 検索バーデザイン
 # ============================================================
-search_col, btn_col = st.columns([6, 1])
-with search_col:
-    query = st.text_input(
-        "",
-        placeholder="例：新宿　個室　居酒屋",
-        label_visibility="collapsed"
-    )
-    st.caption("⚡ キーワードを入力してください")
-with btn_col:
-    search_btn = st.button("🔍 検索", use_container_width=True, type="primary")
+# 余白
+st.markdown("<div style='margin: 25px 0'></div>", unsafe_allow_html=True)
+
+# 枠で囲ってわかりやすくしてみた
+with st.container(border=True):
+    search_col, btn_col = st.columns([6, 1])
+    with search_col:
+        query = st.text_input(
+            "",
+            placeholder="例：新宿　個室　居酒屋",
+            label_visibility="collapsed"
+     )
+        st.caption("⚡ キーワードを入力してください")
+    with btn_col:
+        search_btn = st.button("🔍 検索", use_container_width=True, type="primary")
+
+# 余白
+st.markdown("<div style='margin: 50px 0'></div>", unsafe_allow_html=True)
 
 # ============================================================
-# [C担当] サイドバー：絞り込み条件　デザイン
-# ============================================================
-with st.sidebar:
-    st.header("絞り込み条件")
-
-    area = st.text_input("📍 エリア・駅名", placeholder="例：新橋、渋谷 など")
-
-    budget = st.slider(
-        "¥ 最大予算（夜・一人あたり）",
-        min_value=3000,
-        max_value=15000,
-        value=10000,
-        step=500,
-        format="¥%d"
-    )
-
-    st.markdown("**🎯 目的**")
-    purpose_options = ["接待", "会食", "会社の飲み会", "プライベート"]
-    purposes = [p for p in purpose_options
-                if st.checkbox(p, key=f"purpose_{p}")]
-
-    st.markdown("**🚪 個室・人数**")
-    room = st.radio(
-        "",
-        ["こだわらない", "小人数（〜4名）", "大人数（5名〜）"],
-        label_visibility="collapsed"
-    )
-
-    nomihodai = st.checkbox("🍺 飲み放題あり限定")
-
-    st.markdown("**🚬 喫煙**")
-    non_smoking = st.checkbox("全席禁煙のみ")
-    smoking_ok  = st.checkbox("喫煙可のみ")
-
-    genre = st.selectbox("🍽 ジャンル", [
-        "すべて", "居酒屋", "ダイニングバー・バル", "創作料理",
-        "和食", "洋食", "イタリアン・フレンチ", "中華",
-        "焼肉・ホルモン", "アジア・エスニック料理", "各国料理",
-        "カラオケ・パーティ", "バー・カクテル", "ラーメン",
-        "お好み焼き・もんじゃ", "カフェ・スイーツ", "その他グルメ",
-    ])
-
-    filter_btn = st.button(
-        "この条件で絞り込む",
-        use_container_width=True,
-        type="primary"
-    )
-
-    st.divider()
-
-    if st.button("＋ 店舗を登録する", use_container_width=True):
-        st.session_state['show_register'] = True
-
-# ============================================================
-# ダイアログの呼び出し（サイドバーのwithブロックの外）
+# ダイアログの呼び出し（left_col/right_colの前に書く!!）
 # ============================================================
 if register_hero or st.session_state.get('show_register'):
     st.session_state['show_register'] = False
     register_dialog()
+ 
+if review_hero or st.session_state.get('show_review'):
+    st.session_state['show_review'] = False
+    review_dialog()
+
 
 # ============================================================
 # [B担当] 検索・フィルター処理
@@ -781,27 +894,71 @@ if register_hero or st.session_state.get('show_register'):
 
 
 
-
-
 # ============================================================
-# [C担当] 店舗カード表示デザイン
+# [C担当] 絞り込み条件 + 店舗カード（左右レイアウト）
 # ============================================================
-st.divider()
 
-shops_df = load_shops()
-
-if shops_df.empty:
-    st.info("まだ店舗が登録されていません。「店舗を登録する」ボタンから登録してください。")
-else:
-    result_col, sort_col = st.columns([3, 1])
-    with result_col:
-        st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
-    with sort_col:
-        sort = st.selectbox(
+left_col, right_col = st.columns([1, 3])
+with left_col:
+    with st.container(border=True):  # 外枠で囲む
+        # 本当は背景色も変えたかったけどstreamlitは厳しいので諦め…
+        st.markdown("**絞り込み条件**")
+        area = st.text_input("📍 エリア・駅名", placeholder="例：新橋、渋谷 など")
+        budget = st.slider(
+            "¥ 最大予算（夜・一人あたり）",
+            min_value=3000, max_value=15000,
+            value=10000, step=500, format="¥%d"
+        )
+        st.markdown("**🎯 目的**")
+        purpose_options = ["接待", "会食", "会社の飲み会", "プライベート"]
+        purposes = [p for p in purpose_options
+                    if st.checkbox(p, key=f"purpose_{p}")]
+        st.markdown("**🚪 個室・人数**")
+        room = st.radio(
             "",
-            ["Google評価順", "予算が安い順", "レビューが多い順"],
+            ["こだわらない", "小人数（〜4名）", "大人数（5名〜）"],
             label_visibility="collapsed"
         )
+        nomihodai   = st.checkbox("🍺 飲み放題あり限定")
+        st.markdown("**🚬 喫煙**")
+        non_smoking = st.checkbox("全席禁煙のみ")
+        smoking_ok  = st.checkbox("喫煙可のみ")
+        genre = st.selectbox("🍽 ジャンル", [
+            "すべて", "居酒屋", "ダイニングバー・バル", "創作料理",
+            "和食", "洋食", "イタリアン・フレンチ", "中華",
+            "焼肉・ホルモン", "アジア・エスニック料理", "各国料理",
+            "カラオケ・パーティ", "バー・カクテル", "ラーメン",
+            "お好み焼き・もんじゃ", "カフェ・スイーツ", "その他グルメ",
+        ])
+        filter_btn = st.button(
+            "この条件で絞り込む",
+            use_container_width=True,
+            type="primary"
+        )
+        st.divider()
+        if st.button("＋ 店舗を登録する", use_container_width=True, key="register_sidebar"):
+            st.session_state['show_register'] = True
+
+
+with right_col:
+    # ============================================================
+    # [C担当] 店舗カード表示デザイン
+    # ============================================================
+    shops_df = load_shops()
+
+    if shops_df.empty:
+        st.info("まだ店舗が登録されていません。「店舗を登録する」ボタンから登録してください。")
+    else:
+        result_col, sort_col = st.columns([3, 1])
+        with result_col:
+            st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
+        with sort_col:
+            sort = st.selectbox(
+                "",
+                ["Google評価順", "予算が安い順", "レビューが多い順"],
+                label_visibility="collapsed"
+            )
+
    
     # ============================================================
     # [C担当] 地図を入れるなら（検索結果の最上部にまとめて表示させる？）
@@ -819,19 +976,22 @@ else:
 
     for _, shop in shops_df.iterrows():
         with st.container(border=True):
-            img_col, info_col = st.columns([1, 3])
+            img_col, info_col = st.columns([0.5, 2])
 
             with img_col:
-                if shop.get('photo_url'):
-                    st.image(shop['photo_url'], use_container_width=True)
-                else:
-                    st.markdown("""
-                    <div style="height:90px; background:#F0F0F0; border-radius:8px;
-                                display:flex; align-items:center; justify-content:center;
-                                color:#BBB; font-size:12px">
-                        🏮 画像なし
-                    </div>
-                    """, unsafe_allow_html=True)
+                # 左空白・画像・右空白の3列で中央揃え
+                    _, center, _ = st.columns([0.2, 4, 0.2])
+                    with center:
+                        if shop.get('photo_url'):
+                            st.image(shop['photo_url'], width=200)
+                        else:
+                            st.markdown("""
+                            <div style="height:90px; background:#F0F0F0; border-radius:8px;
+                                        display:flex; align-items:center; justify-content:center;
+                                        color:#BBB; font-size:12px">
+                                🏮 画像なし
+                            </div>
+                            """, unsafe_allow_html=True)
 
             with info_col:
                 name_col, rating_col = st.columns([3, 1])
@@ -842,10 +1002,12 @@ else:
                 with rating_col:
                     if shop.get('google_rating'):
                         st.metric("Google評価", f"⭐ {shop['google_rating']}")
-                
-            ambiance = shop.get('summary', '') #AIによる室内の雰囲気分析
-            if ambiance:
-                st.caption(f"**口コミ分析:** {ambiance}")
+            
+                # 口コミ分析・タグ・金額を右寄せで表示
+                ambiance = shop.get('summary', '')#AIによる室内の雰囲気分析
+                if ambiance:
+                    st.caption(f"**口コミ分析:** {ambiance}")
+
                 #============================================================
                 # [B担当] 徒歩分数の表示
                 #============================================================
@@ -856,8 +1018,8 @@ else:
 
                 tags = []
                 if shop.get('has_private_room'):
-                    cap = f"〜{shop['private_capacity']}名" if shop.get('private_capacity') else ""
-                    tags.append(f"🚪 完全個室{cap}")
+                   cap = f"〜{shop['private_capacity']}名" if shop.get('private_capacity') else ""
+                   tags.append(f"🚪 完全個室{cap}")
                 if shop.get('is_nomihodai'):
                     tags.append("🍺 飲み放題")
                 if shop.get('is_smoking') == 0:
@@ -909,34 +1071,36 @@ else:
                 else:
                     st.caption("まだレビューなし")
 
+            #　レビューコメントの表示について
             if not comments_df.empty:
-                row = comments_df.iloc[0]
-                stars = "★" * int(row['rating']) + "☆" * (5 - int(row['rating']))
-                st.markdown(f"""
-                <div class="review-box">
-                    <div>
-                        <strong>{row['nickname']}</strong>
-                        &nbsp;<span style="background:#F0F0F0; padding:1px 7px;
-                        border-radius:10px; font-size:11px">{row.get('purpose','')}</span>
-                        &nbsp;<span style="color:#F4A444">{stars}</span>
+                for _, row in comments_df.iterrows():  # 全件ループ
+                    stars = "★" * int(row['rating']) + "☆" * (5 - int(row['rating']))
+                    st.markdown(f"""
+                    <div class="review-box">
+                        <div>
+                            <strong>{row['nickname']}</strong>
+                            &nbsp;<span style="background:#F0F0F0; padding:1px 7px;
+                            border-radius:10px; font-size:11px">{row.get('purpose','')}</span>                                &nbsp;<span style="color:#F4A444">{stars}</span>
+                            </div>
+                        <div style="margin-top:6px">{row['review']}</div>
+                        <div class="review-meta">
+                            ¥{int(row['amount_per_person']):,}/人 ·
+                            {row.get('headcount','') or ''}名で利用 ·
+                            {str(row.get('created_at',''))[:10]}
+                        </div>
                     </div>
-                    <div style="margin-top:6px">{row['review']}</div>
-                    <div class="review-meta">
-                        ¥{int(row['amount_per_person']):,}/人 ·
-                        {row.get('headcount','') or ''}名で利用 ·
-                        {str(row.get('created_at',''))[:10]}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
+
             #============================================================
-            # [C担当] レビュー投稿ダイアログの呼び出しを実装する
+            # [C担当] レビュー投稿ダイアログの呼び出し（実装済み）
             #============================================================
-
-
-
             if st.button(
                 "＋ レビューを書く" if not comments_df.empty else "＋ 最初のレビューを書く",
                 key=f"review_btn_{shop['id']}",
                 use_container_width=True
             ):
-                st.session_state['review_target'] = int(shop['id'])
+                st.session_state['rv_shop_id']   = int(shop['id'])
+                st.session_state['rv_shop_name'] = shop['name']   
+                st.session_state['rv_step']      = 2
+                st.session_state['show_review']  = True
+ 
