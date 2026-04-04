@@ -521,6 +521,7 @@ def review_dialog():
                 st.session_state.rv_step      = 1
                 st.session_state.rv_shop_id   = None
                 st.session_state.rv_shop_name = None
+                st.session_state['show_review'] = False
                 st.rerun()  
         with col2:
             if st.button("続けて投稿する", type="primary", use_container_width=True):
@@ -1139,7 +1140,7 @@ with right_col:
                             # 数字が全くなければ、元の文字をそのまま出すか「未設定」とする
                             disp_budget = raw_budget if raw_budget != '0' else "予算情報なし"
 
-                        st.markdown(f"**{disp_budget}**")
+                        st.markdown(f"<div style='font-size:30px; font-weight:700'>{disp_budget}</div>", unsafe_allow_html=True)
                 with btn_col:
                     if shop.get('hotpepper_url'):
                         st.link_button(
