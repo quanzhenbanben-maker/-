@@ -5,6 +5,10 @@ import os
 import requests
 import re
 from dotenv import load_dotenv
+from openai import OpenAI  
+import googlemaps
+from database import create_table
+
 
 load_dotenv() #.envを読み込み
 
@@ -15,8 +19,24 @@ GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '').strip()
 # ============================================================
 # [A担当] STEP1: APIクライアントの初期化
 # ============================================================
+# 初期化：OpenAIというサービスにアクセスするための「自分専用の窓口」を作る
+client = OpenAI(api_key=OPENAI_API_KEY)
 
- 
+# 初期化：Google Maps APIの各機能（ジオコーディングなど）を使うための窓口
+gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+
+# ホットペッパーには公式ライブラリがないことが多いため、
+# requests という標準的な通信ライブラリを使います。
+def fetch_hotpepper(shop_id):
+    url = "http://webservice.recruit.co.jp/hotpepper/gourmet/v1/"
+    params = {
+        "key": HOTPEPPER_API_KEY,
+        "id": shop_id,
+        "format": "json"
+    }
+    response = requests.get(url, params=params)
+    return response.json()
+
 # ============================================================
 # [B担当] STEP1: ベクトル検索用ライブラリの初期化
 # ============================================================
@@ -104,13 +124,74 @@ def save_comment(shop_id, nickname, visited_at, amount, headcount,      # レビ
 # ============================================================
 # [A担当] 店舗取得・保存関数
 # ============================================================
-
 def fetch_hotpepper_by_url(url):
-    pass  #pass は「中身は空だけどエラーにしない」という意味。実装するときに pass を削除して中身を書いてって
-
+    # 1. URLから店舗IDを抜き出す
+    match = re.search(r'str(J\d+)/', url)
+    if not match:
+        return None
+    shop_id = match.group(1)
+    
+    # 2. データを取得
+    data = fetch_hotpepper(shop_id)
+    
+    # データが空、またはお店が見つからない場合の安全策
+    if not data or data['results']['results_available'] == 0:
+        return None
+    
+    # 3. 0番目のお店情報を変数 s に入れる（アクセスしやすくするため）
+    s = data['results']['shop'][0]
+    
+    # 4. 画像の項目に合わせて辞書を作成して返す
+    return {
+        "id": s.get('id'),
+        "name": s.get('name'),
+        "address": s.get('address'),
+        "catch": s.get('catch'),
+        "desc": s.get('genre', {}).get('catch'), # 説明文としてジャンルのキャッチを使用
+        "lat": s.get('lat'),
+        "lng": s.get('lng'),
+        "google_rating": 0.0, # これはGoogle Maps API担当（後回しでOK）
+        "hotpepper_url": url,
+        "photo_url": s.get('photo', {}).get('pc', {}).get('l'),
+        "budget_night": s.get('budget', {}).get('average'),
+        "is_nomihodai": 1 if "あり" in s.get('free_drink', '') else 0,
+        "genre": s.get('genre', {}).get('name'),
+        "access": s.get('access'),
+        "has_private_room": 1 if "あり" in s.get('private_room', '') else 0,
+        "is_smoking": 1 if "全面禁煙" not in s.get('non_smoking', '') else 0,
+        "is_barrier_free": 1 if "あり" in s.get('barrier_free', '') else 0
+    }
 
 def save_shop_to_db(shop):
-    pass #pass は「中身は空だけどエラーにしない」という意味。実装するときに pass を削除して中身を書いてって
+    # 1. データベースファイルに接続（なければ自動で作られます）
+    conn = sqlite3.connect('nomikai_kanji.db')
+    cursor = conn.cursor()
+    
+    # 2. データを保存するSQL文（命令書）を作成
+    sql = """
+    INSERT INTO shops (
+        name, address, catch, photo_url, budget_night, 
+        genre, access, hotpepper_url, lat, lng,
+        has_private_room, is_nomihodai, is_smoking, is_barrier_free
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    
+    # 3. 辞書から値を取り出して実行
+    values = (
+        shop['name'], shop['address'], shop['catch'], shop['photo_url'], shop['budget_night'],
+        shop['genre'], shop['access'], shop['hotpepper_url'], shop['lat'], shop['lng'],
+        shop['has_private_room'], shop['is_nomihodai'], shop['is_smoking'], shop['is_barrier_free']
+    )
+    
+    cursor.execute(sql, values)
+    
+    # 4. 保存を確定させて閉じる
+    conn.commit()
+    new_id = cursor.lastrowid # 今保存したデータのIDをメモしておく
+    conn.close()
+    
+    return new_id # 保存した店にIDがついたので、それを返す
+
 
 
 
@@ -203,23 +284,16 @@ def register_dialog():
                         st.session_state.reg_step        = 3
                         st.session_state.reg_is_existing = True
                     else:
-                        # 新規店舗 → ダミーデータ（Aが実装するまで）
-                        st.session_state.reg_shop_data = {
-                            "name":             "銀座 鮨処 あさみ",
-                            "address":          "東京都中央区銀座5-1-1",
-                            "budget_night":     8000,
-                            "google_rating":    4.3,
-                            "has_private_room": True,
-                            "private_capacity": 6,
-                            "is_nomihodai":     True,
-                            "is_smoking":       0,
-                            "is_barrier_free":  True,
-                            "genre":            "和食・日本料理",
-                            "photo_url":        None,
-                            "hotpepper_url":    url,
-                        }
-                        st.session_state.reg_step        = 2
-                        st.session_state.reg_is_existing = False
+                        # 1. 入力されたURLから、ホットペッパーのデータを取ってくる
+                        shop_info = fetch_hotpepper_by_url(url)
+                        
+                        if shop_info:
+                            # 2. 取得に成功したら、そのデータを保存してSTEP2（確認画面）へ
+                            st.session_state.reg_shop_data = shop_info
+                            st.session_state.reg_step = 2
+                        else:
+                            # 3. 万が一、変なURLだったりお店が見つからなかった場合
+                            st.error("お店の情報を取得できませんでした。URLが正しいか確認してください。")
 
     # ============================================================
     # STEP 2: 内容確認（新規店舗のみ）
@@ -236,7 +310,15 @@ def register_dialog():
             st.caption(f"📍 {shop['address']}")
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("夜の予算",   f"¥{shop['budget_night']:,}" if shop.get('budget_night')   else "未取得")
+            budget_val = shop.get('budget_night')
+            if isinstance(budget_val, int):
+                budget_disp = f"¥{budget_val:,}"
+            elif budget_val:
+                budget_disp = budget_val # "3001〜4000円" などの文字列ならそのまま
+            else:
+                budget_disp = "未取得"
+
+            c1.metric("夜の予算", budget_disp)
             c2.metric("Google評価", f"⭐ {shop['google_rating']}" if shop.get('google_rating') else "未取得")
             c3.metric("個室",       "あり" if shop.get('has_private_room') else "なし")
             c4.metric("飲み放題",   "あり" if shop.get('is_nomihodai')    else "なし")

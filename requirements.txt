@@ -8,15 +8,3 @@ folium
 streamlit-folium
 googlemaps
 scipy
-
-
-# なぜ requirements.txt を作るのか
-#「自分のPCでは動いたのに、他の人の環境では動かない」を防ぐためです。
-# Pythonのライブラリ、なにをインストールすべきかはコードを読まないとわからないので。
-# requirements.txt にライブラリ名を全部書いておくとよい
-
-
-# pip install -r requirements.txt
-#の一行で全員の環境が揃う
-#これがないと `app.py` を動かしたとき `folium` が入ってないとかライブラリ関連のエラーを一個一個自分で解決しないといけなくなる
-
