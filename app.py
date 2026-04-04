@@ -7,6 +7,8 @@ import re
 from dotenv import load_dotenv
 from openai import OpenAI  
 import googlemaps
+import folium
+from streamlit_folium import st_folium
 
 
 
@@ -961,9 +963,55 @@ with right_col:
 
    
     # ============================================================
-    # [C担当] 地図を入れるなら（検索結果の最上部にまとめて表示させる？）
+    # [C担当] 地図を入れるなら（検索結果の最上部にまとめて表示させる）
     # ============================================================
+
+
+    map_df = shops_df.dropna(subset=['lat', 'lng'])
+
+    if not map_df.empty:
+        center_lat = map_df['lat'].mean()
+        center_lng = map_df['lng'].mean()
+
+        m = folium.Map(location=[center_lat, center_lng], zoom_start=14)
+
+        for _, row in map_df.iterrows():
+            # レビューを取得
+            comments_df_map = load_comments(int(row['id']))
+            review_html = ""
+            if not comments_df_map.empty:
+                r = comments_df_map.iloc[0]
+                stars = "★" * int(r['rating']) + "☆" * (5 - int(r['rating']))
+                review_html = f"""
+                <hr style="margin:6px 0">
+                <div style="font-size:12px">
+                    💬 <b>{r['nickname']}</b> {stars}<br>
+                    {r['review'][:50]}{'...' if len(r['review']) > 50 else ''}
+                </div>
+                """
+
+            popup_html = f"""
+            <div style="font-size:13px; min-width:150px">
+                <b>{row['name']}</b><br>
+                📍 {row.get('address', '')}<br>
+                ⭐ {row.get('google_rating', '')}　¥{row.get('budget_night', '')}〜
+                {review_html}
+                <hr style="margin:6px 0">
+                <a href="{row.get('hotpepper_url', '')}" target="_blank">
+                    ホットペッパーで見る →
+                </a>
+            </div>
+            """
+            folium.Marker(
+                location=[row['lat'], row['lng']],
+                popup=folium.Popup(popup_html, max_width=250),
+                tooltip=row['name'],
+                icon=folium.Icon(color='red', icon='cutlery', prefix='fa')
+            ).add_to(m)
     
+        st_folium(m, use_container_width=True, height=350)
+    else:
+        st.caption("📍 店舗が登録されると地図が表示されます")
    
 
     #============================================================
