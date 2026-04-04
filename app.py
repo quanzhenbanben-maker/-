@@ -413,56 +413,79 @@ def review_dialog():
                     st.session_state.rv_step      = 2
 
     # ============================================================
-    # STEP 2: レビュー入力
+    # STEP 2: レビュー投稿＆削除できるように
     # ============================================================
     elif st.session_state.rv_step == 2:
+        
         st.info(f"**{st.session_state.rv_shop_name}** にレビューを投稿します")
         st.divider()
 
+        # 編集モードかどうか確認
+        edit_data = st.session_state.get('rv_edit_data', {})
+    
         col_back, _ = st.columns([1, 3])
         with col_back:
             if st.button("← 戻る", use_container_width=True):
                 st.session_state.rv_step = 1
+                st.session_state.rv_edit_id   = None
+                st.session_state.rv_edit_data = {}
 
-        nickname = st.text_input("👤 あだ名 *", placeholder="例：さとう")
-        rating = st.select_slider(
-            "⭐ 総合評価 *",
-            options=[1, 2, 3, 4, 5],
-            value=3,
-            format_func=lambda x: "★" * x + "☆" * (5 - x)
-        )
-        review = st.text_area(
-            "📝 レビュー本文 *",
-            placeholder="誰といった？食事の提供スピードは？トイレは清潔？会食向き？など、自由に！",
-            height=120
-        )
-        purpose = st.radio(
-            "🎯 目的 *",
+        nickname = st.text_input("👤 あだ名 *",
+            value=edit_data.get('nickname', ''),
+            placeholder="例：さとう")
+
+        rating = st.select_slider("⭐ 総合評価 *",
+            options=[1,2,3,4,5],
+            value=int(edit_data.get('rating', 3)),
+            format_func=lambda x: "★"*x+"☆"*(5-x))
+
+        review = st.text_area("📝 レビュー本文 *",
+            value=edit_data.get('review', ''),
+            placeholder="誰といった？食事の提供スピードは？など、自由に！",
+            height=120)
+
+        purpose = st.radio("🎯 目的 *",
             ["接待", "会食", "会社の飲み会", "プライベート"],
-            horizontal=True
-        )
-        noise_level = st.radio(
-            "🔊 雰囲気 *",
+            index=["接待","会食","会社の飲み会","プライベート"].index(
+                edit_data.get('purpose', '接待')
+            ) if edit_data.get('purpose') else 0,
+            horizontal=True)
+
+        noise_level = st.radio("🔊 雰囲気 *",
             ["静か", "ふつう", "うるさい"],
-            horizontal=True
-        )
-        amount = st.number_input(
-            "💰 一人あたりの金額 *（円）",
-            min_value=0, max_value=100000, step=500, value=5000
-        )
+            index=["静か","ふつう","うるさい"].index(
+                edit_data.get('noise_level', '静か') 
+            ) if edit_data.get('noise_level') else 0,
+            horizontal=True)
+
+        amount = st.number_input("💰 一人あたりの金額 *（円）",
+            min_value=0, max_value=100000, step=500,
+            value=int(edit_data.get('amount_per_person', 5000)))
+
         with st.expander("任意項目を入力する"):
             visited_at = st.date_input("📅 訪問日", value=None)
-            headcount  = st.number_input("👥 人数", min_value=1, max_value=100, step=1, value=4)
+            headcount  = st.number_input("👥 人数",
+                min_value=1, max_value=100, step=1,
+                value=int(edit_data.get('headcount', 4) or 4))
 
         st.divider()
 
-        if st.button("🚀 レビューを投稿する", type="primary", use_container_width=True):
+        btn_label = "🔄 レビューを更新する" if edit_data else "🚀 レビューを投稿する"
+        if st.button(btn_label, type="primary", use_container_width=True):
             if not nickname:
                 st.warning("あだ名を入力してください")
             elif not review:
                 st.warning("レビュー本文を入力してください")
             else:
                 with st.spinner("保存中..."):
+                    # 編集の場合は既存レビューを削除してから再投稿
+                    if st.session_state.get('rv_edit_id'):
+                        conn = sqlite3.connect('nomikai_kanji.db')
+                        conn.execute("DELETE FROM comments WHERE id = ?",
+                                 (st.session_state.rv_edit_id,))
+                        conn.commit()
+                        conn.close()
+
                     save_comment(
                         shop_id     = st.session_state.rv_shop_id,
                         nickname    = nickname,
@@ -474,7 +497,9 @@ def review_dialog():
                         purpose     = purpose,
                         noise_level = noise_level
                     )
-                st.session_state.rv_step = 3
+                st.session_state.rv_edit_id   = None
+                st.session_state.rv_edit_data = {}
+                st.session_state.rv_step      = 3
 
     # ============================================================
     # STEP 3: 完了
@@ -496,6 +521,7 @@ def review_dialog():
                 st.session_state.rv_step      = 1
                 st.session_state.rv_shop_id   = None
                 st.session_state.rv_shop_name = None
+                st.rerun()  
         with col2:
             if st.button("続けて投稿する", type="primary", use_container_width=True):
                 st.session_state.rv_step      = 1
@@ -1153,6 +1179,15 @@ with right_col:
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+
+                    # 間違えたレビューは修正できるように
+                    if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
+                        st.session_state['rv_shop_id']    = int(shop['id'])
+                        st.session_state['rv_shop_name']  = shop['name']
+                        st.session_state['rv_edit_id']    = int(row['id'])      # 編集対象のレビューID
+                        st.session_state['rv_edit_data']  = row.to_dict()       # 既存の内容を保持
+                        st.session_state['rv_step']       = 2
+                        st.session_state['show_review']   = True
 
             #============================================================
             # [C担当] レビュー投稿ダイアログの呼び出し（実装済み）
