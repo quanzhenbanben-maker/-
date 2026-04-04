@@ -787,7 +787,7 @@ def register_dialog():
                             )
                             # 保存が終わったら完了画面（STEP 4）へ
                             st.session_state.reg_step = 4
-                            st.rerun()
+                            
                         else:
                             st.error("店舗の保存に失敗したため、レビューを保存できませんでした。")
 
