@@ -434,10 +434,18 @@ def review_dialog():
             value=edit_data.get('nickname', ''),
             placeholder="例：さとう")
 
-        rating = st.select_slider("⭐ 総合評価 *",
-            options=[1,2,3,4,5],
-            value=int(edit_data.get('rating', 3)),
-            format_func=lambda x: "★"*x+"☆"*(5-x))
+        rating_labels = ["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"]
+        # 編集モードのときは既存の評価を初期選択にする
+        default_index = int(edit_data.get('rating', 3)) - 1 if edit_data else 2
+
+        rating_label = st.radio(
+            "⭐ 総合評価 *",
+            rating_labels,
+            index=default_index,
+            horizontal=True
+        )
+        # ラベルから数値に変換（★の数を数える）
+        rating = rating_labels.index(rating_label) + 1
 
         review = st.text_area("📝 レビュー本文 *",
             value=edit_data.get('review', ''),
@@ -714,13 +722,17 @@ def register_dialog():
 
         nickname = st.text_input("👤 あだ名 *", placeholder="例：さとう")
 
-        rating = st.select_slider(
+        
+        rating_labels = ["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"]
+        rating_label = st.radio(
             "⭐ 総合評価 *",
-            options=[1, 2, 3, 4, 5],
-            value=3,
-            format_func=lambda x: "★" * x + "☆" * (5 - x)
+            rating_labels,
+            index=2,  # デフォルト★★★
+            horizontal=True
         )
-
+        # ラベルから数値に変換
+        rating = rating_labels.index(rating_label) + 1
+        
         review = st.text_area(
             "📝 レビュー本文 *",
             placeholder="誰といった？食事の提供スピードは？トイレは清潔？会食向き？など、自由に！",
@@ -870,24 +882,12 @@ with col_hero:
     </div>
     """, unsafe_allow_html=True)
 
-    hero_col1, hero_col2 , hero_col3 = st.columns([1, 1, 1])
+    hero_col1, hero_col2 = st.columns([1, 1])
     with hero_col1:
-        search_hero = st.button(
-            "🔍 お店を探す",
-            use_container_width=True,
-            type="primary"
-        )
+        register_hero = st.button("＋ 店舗を登録する", use_container_width=True)
     with hero_col2:
-        register_hero = st.button(
-            "＋ 店舗を登録する",
-            use_container_width=True
-        )
-    with hero_col3:
-        review_hero = st.button(
-            "✏️ レビューを書く",
-            use_container_width=True
-        )
-
+        review_hero = st.button("✏️ レビューを書く", use_container_width=True)
+    
 with col_img:
     st.image(
         "Gemini_Generated_Image_u7jbhtu7jbhtu7jb.png",
@@ -913,7 +913,7 @@ with st.container(border=True):
      )
         st.caption("⚡ キーワードを入力してください")
     with btn_col:
-        search_btn = st.button("🔍 検索", use_container_width=True, type="primary")
+        search_btn = st.button("🔍 お店を探す", use_container_width=True, type="primary")
 
 # 余白
 st.markdown("<div style='margin: 50px 0'></div>", unsafe_allow_html=True)
@@ -1023,7 +1023,11 @@ with right_col:
             review_html = ""
             if not comments_df_map.empty:
                 r = comments_df_map.iloc[0]
-                stars = "★" * int(r['rating']) + "☆" * (5 - int(r['rating']))
+                try:
+                    rating_int = int(float(str(r['rating']).strip()))
+                except (ValueError, TypeError):
+                    rating_int = 3
+                stars = "★" * rating_int + "☆" * (5 - rating_int)
                 review_html = f"""
                 <hr style="margin:6px 0">
                 <div style="font-size:12px">
@@ -1064,24 +1068,52 @@ with right_col:
 
 
 
-    for _, shop in shops_df.iterrows():
+    # ページネーション
+    ITEMS_PER_PAGE = 10
+    total = len(shops_df)
+    total_pages = (total + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 1
+
+    # ページ番号の表示・操作
+    page_col1, page_col2, page_col3 = st.columns([1, 2, 1])
+    with page_col1:
+        if st.button("← 前へ", disabled=st.session_state.current_page <= 1):
+            st.session_state.current_page -= 1
+    with page_col2:
+        st.markdown(
+            f"<div style='text-align:center'>{st.session_state.current_page} / {total_pages} ページ</div>",
+            unsafe_allow_html=True
+        )
+    with page_col3:
+        if st.button("次へ →", disabled=st.session_state.current_page >= total_pages):
+            st.session_state.current_page += 1
+
+    # 表示するデータを絞り込む
+    start = (st.session_state.current_page - 1) * ITEMS_PER_PAGE
+    end   = start + ITEMS_PER_PAGE
+    paged_df = shops_df.iloc[start:end]
+
+  
+    for _, shop in paged_df.iterrows():
         with st.container(border=True):
             img_col, info_col = st.columns([0.5, 2])
 
             with img_col:
                 # 左空白・画像・右空白の3列で中央揃え
-                    _, center, _ = st.columns([0.2, 4, 0.2])
-                    with center:
-                        if shop.get('photo_url'):
-                            st.image(shop['photo_url'], width=200)
-                        else:
-                            st.markdown("""
-                            <div style="height:90px; background:#F0F0F0; border-radius:8px;
-                                        display:flex; align-items:center; justify-content:center;
-                                        color:#BBB; font-size:12px">
-                                🏮 画像なし
-                            </div>
-                            """, unsafe_allow_html=True)
+                _, center, _ = st.columns([0.2, 4, 0.2])
+                with center:
+                    if shop.get('photo_url'):
+                        st.image(shop['photo_url'], width=200)
+                    else:
+                        st.markdown("""
+                        <div style="height:90px; background:#F0F0F0; border-radius:8px;
+                                    display:flex; align-items:center; justify-content:center;
+                                    color:#BBB; font-size:12px">
+                            🏮 画像なし
+                        </div>
+                        """, unsafe_allow_html=True)
 
             with info_col:
                 name_col, rating_col = st.columns([3, 1])
@@ -1163,8 +1195,12 @@ with right_col:
 
             #　レビューコメントの表示について
             if not comments_df.empty:
-                for _, row in comments_df.iterrows():  # 全件ループ
-                    stars = "★" * int(row['rating']) + "☆" * (5 - int(row['rating']))
+                for _, row in comments_df.iterrows():
+                    try:
+                        rating_int = int(float(str(row['rating']).strip()))
+                    except (ValueError, TypeError):
+                        rating_int = 3
+                    stars = "★" * rating_int + "☆" * (5 - rating_int)
                     st.markdown(f"""
                     <div class="review-box">
                         <div>
@@ -1202,4 +1238,19 @@ with right_col:
                 st.session_state['rv_shop_name'] = shop['name']   
                 st.session_state['rv_step']      = 2
                 st.session_state['show_review']  = True
- 
+    
+
+
+    # ページネーション
+    page_col1, page_col2, page_col3 = st.columns([1, 2, 1])
+    with page_col1:
+        if st.button("← 前へ", disabled=st.session_state.current_page <= 1, key="prev_bottom"):
+            st.session_state.current_page -= 1
+    with page_col2:
+        st.markdown(
+            f"<div style='text-align:center'>{st.session_state.current_page} / {total_pages} ページ</div>",
+            unsafe_allow_html=True
+        )
+    with page_col3:
+        if st.button("次へ →", disabled=st.session_state.current_page >= total_pages, key="next_bottom"):
+            st.session_state.current_page += 1
