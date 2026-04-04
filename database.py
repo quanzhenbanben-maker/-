@@ -18,7 +18,7 @@ def create_table():
         lat              REAL,
         lng              REAL,
         google_rating    REAL DEFAULT 0,
-        hotpepper_url    TEXT,
+        hotpepper_url    TEXT UNIQUE,
         photo_url        TEXT,
         budget_night     TEXT, 
         is_nomihodai     INTEGER, 

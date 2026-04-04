@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from openai import OpenAI  
 import googlemaps
 from database import create_table
+import sqlite3
 
 
 load_dotenv() #.envを読み込み
@@ -112,7 +113,7 @@ def save_comment(shop_id, nickname, visited_at, amount, headcount,      # レビ
                  rating, review, purpose, noise_level):
     conn = sqlite3.connect('nomikai_kanji.db')
     conn.execute("""
-        INSERT INTO comments
+        INSERT OR REPLACE INTO comments
         (shop_id, nickname, visited_at, amount_per_person, headcount,
          rating, review, purpose, noise_level)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -150,7 +151,9 @@ def fetch_hotpepper_by_url(url):
         "desc": s.get('genre', {}).get('catch'), # 説明文としてジャンルのキャッチを使用
         "lat": s.get('lat'),
         "lng": s.get('lng'),
-        "google_rating": 0.0, # これはGoogle Maps API担当（後回しでOK）
+        "google_rating": 0.0, 
+        "google_reviews": [], # ← これを追加しておくと⑤の時に便利
+        "summary": "",         # ← これを追加しておくと③の時に便利
         "hotpepper_url": url,
         "photo_url": s.get('photo', {}).get('pc', {}).get('l'),
         "budget_night": s.get('budget', {}).get('average'),
@@ -162,37 +165,175 @@ def fetch_hotpepper_by_url(url):
         "is_barrier_free": 1 if "あり" in s.get('barrier_free', '') else 0
     }
 
+def enrich_shop_data(shop):
+    """
+    ホットペッパーで取得したデータに、Google Mapsの情報を追加する
+    """
+    # 1. Google Mapsで店名を検索
+    places_result = gmaps.places(query=f"{shop['name']} {shop['address']}")
+    
+    if places_result['status'] == 'OK' and len(places_result['results']) > 0:
+            place = places_result['results'][0]
+            place_id = place['place_id']
+            
+            # --- 緯度・経度をGoogleのものに更新 ---
+            shop['lat'] = place['geometry']['location']['lat']
+            shop['lng'] = place['geometry']['location']['lng']
+            
+            details = gmaps.place(place_id=place_id, fields=['rating', 'user_ratings_total', 'reviews'])
+            
+            if 'result' in details:
+                r = details['result']
+                shop['google_rating'] = r.get('rating', 0.0)
+                # 今後使うために口コミも保存
+                shop['google_reviews'] = r.get('reviews', [])
+            
+    return shop
+
+
 def save_shop_to_db(shop):
-    # 1. データベースファイルに接続（なければ自動で作られます）
+    # 1. 戻り値用の変数を共通化する
+    target_id = None
+    
+    # 2. 接続はここだけで行う
     conn = sqlite3.connect('nomikai_kanji.db')
     cursor = conn.cursor()
+
+    try:
+        # すでに同じホットペッパーURLがあるか確認
+        cursor.execute("SELECT id FROM shops WHERE hotpepper_url = ?", (shop.get('hotpepper_url'),))
+        existing_shop = cursor.fetchone()
+        
+        # 既存IDがあればそれを使う、なければNone
+        shop_id = existing_shop[0] if existing_shop else None
+
+        # SQL文（INSERT OR REPLACE）
+        sql = """
+        INSERT OR REPLACE INTO shops (
+            id, name, address, catch, photo_url, budget_night, 
+            genre, access, hotpepper_url, lat, lng,
+            has_private_room, is_nomihodai, is_smoking, is_barrier_free,
+            google_rating, summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        values = (
+            shop_id,
+            shop.get('name'),
+            shop.get('address'),
+            shop.get('catch'),
+            shop.get('photo_url'),
+            shop.get('budget_night', 0),
+            shop.get('genre'),
+            shop.get('access'),
+            shop.get('hotpepper_url'),
+            shop.get('lat'),
+            shop.get('lng'),
+            shop.get('has_private_room', 0),
+            shop.get('is_nomihodai', 0),
+            shop.get('is_smoking', 0),
+            shop.get('is_barrier_free', 0),
+            shop.get('google_rating', 0.0),
+            shop.get('summary', '')
+        )
+
+        cursor.execute(sql, values)
+        conn.commit()
+
+        # 3. 確定したIDをセット（ここが重要！）
+        # 上書きした場合は shop_id、新規なら cursor.lastrowid を代入
+        if shop_id:
+            target_id = shop_id
+        else:
+            target_id = cursor.lastrowid
+            
+    except Exception as e:
+        st.error(f"DB保存時にエラーが発生しました: {e}")
+        target_id = None
+    finally:
+        conn.close()
     
-    # 2. データを保存するSQL文（命令書）を作成
-    sql = """
-    INSERT INTO shops (
-        name, address, catch, photo_url, budget_night, 
-        genre, access, hotpepper_url, lat, lng,
-        has_private_room, is_nomihodai, is_smoking, is_barrier_free
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    # 4. 最後に target_id を返す
+    return target_id
+
+def generate_summary(reviews_text):
     """
+    Googleの口コミをAIで要約する
+    """
+    if not reviews_text or len(reviews_text) < 10:
+        return "口コミデータが不足しているため、詳細な分析ができません。"
+
     
-    # 3. 辞書から値を取り出して実行
-    values = (
-        shop['name'], shop['address'], shop['catch'], shop['photo_url'], shop['budget_night'],
-        shop['genre'], shop['access'], shop['hotpepper_url'], shop['lat'], shop['lng'],
-        shop['has_private_room'], shop['is_nomihodai'], shop['is_smoking'], shop['is_barrier_free']
+    prompt = f"""
+    「あなたはプロの飲み会幹事です。提供された複数の口コミから、以下の4点を各項目15文字以内で、合計60文字程度でまとめてください。
+    【雰囲気】（例：ガヤガヤ、静か、個室感）
+    【推し】（(例: 刺身が絶品/ビールが速い)）
+    【懸念】（悪い口コミや注意点(例: トイレが1つ/席が狭い)）
+    【総評】（(例: 接待よりは身内向け)
+
+出力形式：
+【雰囲気】〇〇 / 【推し】〇〇 / 【懸念】：〇〇 / 【総評】：〇〇」
+    {reviews_text}
+    """
+
+    try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            # 50文字の文章だけを返す
+            return response.choices[0].message.content.strip()
+    except:
+        return "分析エラー"
+
+def get_embedding(text):
+    """
+    検索クエリをベクトル化する
+    """
+    response = client.embeddings.create(
+        input=text,
+        model="text-embedding-3-small"
     )
-    
-    cursor.execute(sql, values)
-    
-    # 4. 保存を確定させて閉じる
-    conn.commit()
-    new_id = cursor.lastrowid # 今保存したデータのIDをメモしておく
-    conn.close()
-    
-    return new_id # 保存した店にIDがついたので、それを返す
+    return response.data[0].embedding
 
 
+def get_google_reviews(shop_name, address):
+    """
+    店名と住所からGoogle Mapsの口コミを取得する
+    """
+    # 1. Place IDを探す
+    search_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
+    params = {
+        "input": f"{shop_name} {address}",
+        "inputtype": "textquery",
+        "fields": "place_id",
+        "key": GOOGLE_MAPS_API_KEY
+    }
+    res = requests.get(search_url, params=params).json()
+    
+    if not res.get("candidates"):
+        return ""
+
+    place_id = res["candidates"][0]["place_id"]
+
+    # 2. 口コミ（Reviews）を取得する
+    details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+    params = {
+        "place_id": place_id,
+        "fields": "reviews",
+        "language": "ja",
+        "key": GOOGLE_MAPS_API_KEY
+    }
+    details_res = requests.get(details_url, params=params).json()
+    
+    reviews = details_res.get("result", {}).get("reviews", [])
+    
+    # 全ての口コミを1つのテキストにまとめる
+    combined_reviews = ""
+    for r in reviews:
+        combined_reviews += f"【評価:{r['rating']}点】\n{r['text']}\n\n"
+        
+    return combined_reviews
 
 
 # ============================================================
@@ -289,8 +430,18 @@ def register_dialog():
                         
                         if shop_info:
                             # 2. 取得に成功したら、そのデータを保存してSTEP2（確認画面）へ
+                            shop_info = enrich_shop_data(shop_info)
                             st.session_state.reg_shop_data = shop_info
                             st.session_state.reg_step = 2
+                            # 口コミ取得
+                            reviews_text = get_google_reviews(shop_info['name'], shop_info['address'])
+                            
+                            # AI分析結果を直接 summary に入れる
+                            shop_info['summary'] = generate_summary(reviews_text)
+                            
+                            st.session_state.reg_shop_data = shop_info
+                            st.session_state.reg_step = 2
+                
                         else:
                             # 3. 万が一、変なURLだったりお店が見つからなかった場合
                             st.error("お店の情報を取得できませんでした。URLが正しいか確認してください。")
@@ -310,11 +461,22 @@ def register_dialog():
             st.caption(f"📍 {shop['address']}")
 
             c1, c2, c3, c4 = st.columns(4)
+
+            # --- 予算表示のクレンジング処理 ---
             budget_val = shop.get('budget_night')
-            if isinstance(budget_val, int):
-                budget_disp = f"¥{budget_val:,}"
+            
+ 
+            match = re.search(r'\d+', re.sub(r',', '', str(budget_val))) if budget_val else None
+            
+            if match:
+                # 最初に見つかった数字の塊を取得
+                numeric_str = match.group()
+                budget_disp = f"¥{int(numeric_str):,}〜"
+                # DB保存用にも数値をセット
+                st.session_state.reg_shop_data['budget_night'] = int(numeric_str)
             elif budget_val:
-                budget_disp = budget_val # "3001〜4000円" などの文字列ならそのまま
+                # 数字はないが文字がある場合
+                budget_disp = budget_val
             else:
                 budget_disp = "未取得"
 
@@ -336,9 +498,11 @@ def register_dialog():
         with col_back:
             if st.button("← 戻る", use_container_width=True):
                 st.session_state.reg_step = 1
+          
         with col_next:
             if st.button("レビューを書く →", type="primary", use_container_width=True):
                 st.session_state.reg_step = 3
+         
 
     # ============================================================
     # STEP 3: レビュー入力
@@ -420,29 +584,46 @@ def register_dialog():
                     st.warning("レビュー本文を入力してください")
                 else:
                     with st.spinner("保存中..."):
+                        # --- 1. 金額の掃除 ---
+                        amount_str = str(amount)
+                        numeric_amount = re.sub(r'\D', '', amount_str)
+                        amount_int = int(numeric_amount) if numeric_amount else 0
+
+                        # --- 2. 保存先の shop_id を決定する ---
                         if st.session_state.reg_is_existing:
-                            # 既存店舗 → レビューだけ保存
+                            # 既存店舗なら、保持していたIDを使う
+                            target_shop_id = st.session_state.reg_shop_id
+                        else:
+                            # 新規店舗なら、まず店舗をDBに保存して新しいIDを取得
+                            raw_budget = str(st.session_state.reg_shop_data.get('budget_night', '0'))
+                            match = re.search(r'\d+', re.sub(r',', '', raw_budget))
+                            
+                            if match:
+                                st.session_state.reg_shop_data['budget_night'] = int(match.group())
+                            else:
+                                st.session_state.reg_shop_data['budget_night'] = 0
+
+                            # 店舗保存！
+                            target_shop_id = save_shop_to_db(st.session_state.reg_shop_data)
+
+                        # --- 3. 決定したIDでレビューを保存 ---
+                        if target_shop_id:
                             save_comment(
-                                shop_id     = st.session_state.reg_shop_id,
+                                shop_id     = target_shop_id, # ここを共通の変数にする
                                 nickname    = nickname,
                                 visited_at  = visited_at,
-                                amount      = amount,
+                                amount      = amount_int,
                                 headcount   = headcount,
                                 rating      = rating,
                                 review      = review,
                                 purpose     = purpose,
                                 noise_level = noise_level
                             )
+                            # 保存が終わったら完了画面（STEP 4）へ
+                            st.session_state.reg_step = 4
+                            st.rerun()
                         else:
-                            # ============================================================
-                            # [A担当] 新規店舗をDBに保存してレビューも登録する
-                            # 1. save_shop_to_db(shop) を呼んでshop_idを取得
-                            # 2. save_comment() でレビューを保存
-                            # 実装したら下記のpassを削除すること
-                            # ============================================================
-                            pass
-                            
-                    st.session_state.reg_step = 4
+                            st.error("店舗の保存に失敗したため、レビューを保存できませんでした。")
 
     # ============================================================
     # STEP 4: 完了
@@ -656,9 +837,15 @@ else:
                 name_col, rating_col = st.columns([3, 1])
                 with name_col:
                     st.markdown(f"### {shop['name']}")
+                    if shop.get('address'):
+                        st.caption(f"📍 {shop['address']}")
                 with rating_col:
                     if shop.get('google_rating'):
                         st.metric("Google評価", f"⭐ {shop['google_rating']}")
+                
+            ambiance = shop.get('summary', '') #AIによる室内の雰囲気分析
+            if ambiance:
+                st.caption(f"**口コミ分析:** {ambiance}")
                 #============================================================
                 # [B担当] 徒歩分数の表示
                 #============================================================
@@ -688,7 +875,20 @@ else:
                 price_col, btn_col = st.columns([2, 1])
                 with price_col:
                     if shop.get('budget_night'):
-                        st.markdown(f"**¥{int(shop['budget_night']):,}〜**")
+                        # 予算データを取り出す（空なら '0' にしておく）
+                        raw_budget = str(shop.get('budget_night', '0'))
+
+                        # 数字だけを抜き出す（例：「平均：8000円」→「8000」）
+                        numeric_budget = re.sub(r'\D', '', raw_budget)
+
+                        if numeric_budget:
+                            # 数字があればカンマ区切りで表示
+                            disp_budget = f"¥{int(numeric_budget):,}〜"
+                        else:
+                            # 数字が全くなければ、元の文字をそのまま出すか「未設定」とする
+                            disp_budget = raw_budget if raw_budget != '0' else "予算情報なし"
+
+                        st.markdown(f"**{disp_budget}**")
                 with btn_col:
                     if shop.get('hotpepper_url'):
                         st.link_button(
