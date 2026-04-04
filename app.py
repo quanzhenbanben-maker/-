@@ -605,45 +605,60 @@ def register_dialog():
         st.success(f"✅ 取得完了：{shop['name']}")
 
         with st.container(border=True):
-            if shop.get('photo_url'):
-                st.image(shop['photo_url'], use_container_width=True)
+            img_col, info_col = st.columns([0.5, 1])
+    
+            with img_col:
+                if shop.get('photo_url'):
+                    st.markdown(f"""
+                    <div style="height:100%; min-height:300px; overflow:hidden; border-radius:8px;">
+                        <img src="{shop['photo_url']}" 
+                            style="width:100%; height:100%; object-fit:cover;">
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            with info_col:
+                st.markdown(f"### {shop['name']}")
+                st.caption(f"📍 {shop['address']}")
+                
+                st.divider()
 
-            st.markdown(f"### {shop['name']}")
-            st.caption(f"📍 {shop['address']}")
+                c1, c2 = st.columns(2)
 
-            c1, c2, c3, c4 = st.columns(4)
 
-            # --- 予算表示のクレンジング処理 ---
-            budget_val = shop.get('budget_night')
+                # --- 予算表示のクレンジング処理 ---
+                budget_val = shop.get('budget_night')
             
  
-            match = re.search(r'\d+', re.sub(r',', '', str(budget_val))) if budget_val else None
+                match = re.search(r'\d+', re.sub(r',', '', str(budget_val))) if budget_val else None
             
-            if match:
-                # 最初に見つかった数字の塊を取得
-                numeric_str = match.group()
-                budget_disp = f"¥{int(numeric_str):,}〜"
-                # DB保存用にも数値をセット
-                st.session_state.reg_shop_data['budget_night'] = int(numeric_str)
-            elif budget_val:
-                # 数字はないが文字がある場合
-                budget_disp = budget_val
-            else:
-                budget_disp = "未取得"
+                if match:
+                    # 最初に見つかった数字の塊を取得
+                    numeric_str = match.group()
+                    budget_disp = f"¥{int(numeric_str):,}〜"
+                    # DB保存用にも数値をセット
+                    st.session_state.reg_shop_data['budget_night'] = int(numeric_str)
+                elif budget_val:
+                    # 数字はないが文字がある場合
+                    budget_disp = budget_val
+                else:
+                    budget_disp = "未取得"
 
-            c1.metric("夜の予算", budget_disp)
-            c2.metric("Google評価", f"⭐ {shop['google_rating']}" if shop.get('google_rating') else "未取得")
-            c3.metric("個室",       "あり" if shop.get('has_private_room') else "なし")
-            c4.metric("飲み放題",   "あり" if shop.get('is_nomihodai')    else "なし")
+                c1.metric("夜の予算", budget_disp)
+                c2.metric("Google評価", f"⭐ {shop['google_rating']}" if shop.get('google_rating') else "未取得")
+                c3, c4 = st.columns(2)
+                c3.metric("個室",       "あり" if shop.get('has_private_room') else "なし")
+                c4.metric("飲み放題",   "あり" if shop.get('is_nomihodai')    else "なし")
 
-            tags = []
-            if shop.get('genre'):             tags.append(f"🍽 {shop['genre']}")
-            if shop.get('is_smoking') == 0:   tags.append("🚭 全席禁煙")
-            if shop.get('is_barrier_free'):   tags.append("♿ バリアフリー")
-            st.markdown(
-                " ".join([f'<span class="tag">{t}</span>' for t in tags]),
-                unsafe_allow_html=True
-            )
+                st.divider()
+
+                tags = []
+                if shop.get('genre'):             tags.append(f"🍽 {shop['genre']}")
+                if shop.get('is_smoking') == 0:   tags.append("🚭 全席禁煙")
+                if shop.get('is_barrier_free'):   tags.append("♿ バリアフリー")
+                st.markdown(
+                    " ".join([f'<span class="tag">{t}</span>' for t in tags]),
+                    unsafe_allow_html=True
+                )
 
         col_back, col_next = st.columns([1, 2])
         with col_back:
@@ -818,10 +833,10 @@ col_hero, col_img = st.columns([1, 1])
 with col_hero:
     st.markdown("""
     <div style="padding: 32px 0 24px">
-        <div style="font-size:36px; font-weight:900; line-height:1.3; margin-bottom:12px">
+        <div style="font-size:52px; font-weight:900; line-height:1.3; margin-bottom:12px">
             幹事の強い味方、<br>ここにあります。
         </div>
-        <div style="font-size:14px; color:#666; line-height:1.8; margin-bottom:24px">
+        <div style="font-size:20px; color:#666; line-height:1.8; margin-bottom:24px">
             社内データベースを活用した飲食店検索・管理ツール。<br>
             最適なお店を数秒で見つけましょう。
         </div>
@@ -852,13 +867,13 @@ with col_img:
         use_container_width=True
     )
 
-st.divider()
+
 
 # ============================================================
 # [C担当] 検索バーデザイン
 # ============================================================
 # 余白
-st.markdown("<div style='margin: 25px 0'></div>", unsafe_allow_html=True)
+st.markdown("<div style='margin: 60px 0'></div>", unsafe_allow_html=True)
 
 # 枠で囲ってわかりやすくしてみた
 with st.container(border=True):
