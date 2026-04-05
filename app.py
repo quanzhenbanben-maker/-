@@ -87,24 +87,7 @@ st.markdown("""
 # ============================================================
 # DB接続
 # ============================================================
-# --- 以下の 30行を関数の定義エリア（20行目付近〜）に追加 ---
-import sqlite3
-import pandas as pd
-import numpy as np
-import sklearn.metrics.pairwise as pw
-import math
-from sentence_transformers import SentenceTransformer
-import streamlit as st
 
-# --- 1. AIモデルの準備（関数の「外」に置くのが鉄則です！） ---
-@st.cache_resource
-def load_embed_model():
-    # 日本語モデルを読み込む（起動時の1回だけで済むようになります）
-    return SentenceTransformer('cl-nagoya/sup-simcse-ja-base')
-
-model = load_embed_model()
-
-# --- 2. メインの関数 ---
 # --- 2. メインの関数 ---
 def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai, is_smoking, query=None, purposes=None):
     """
@@ -198,11 +181,9 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
 
     # --- STEP 2: AIによるハイブリッドスコアリング ---
     if query and not df.empty:
-        # 検索クエリをベクトル（数値）に変換
-        query_vec = model.encode([query])
+        query_vec = get_embedding(query)
 
         def _calculate_score(row):
-            # ① キーワード一致スコア (最大 70点)
             kw_s = 0
             q = query.lower()
             if q in str(row.get('name','')).lower(): kw_s += 40
@@ -211,24 +192,23 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
             if q in str(row.get('address','')).lower(): kw_s += 5
             kw_s = min(kw_s, 70)
 
-            # ② AI類似度スコア (最大 30点)
             vec_s = 0
             vec_raw = row.get('summary_vector')
-            if vec_raw and isinstance(vec_raw, (bytes, bytearray)):
-                # 保存されているバイナリを数値に戻して比較
-                target_vec = np.frombuffer(vec_raw, dtype=np.float32).reshape(1, -1)
-                sim = pw.cosine_similarity(query_vec, target_vec)[0][0]
-                vec_s = max(0, sim) * 30
-            
+            if vec_raw:
+                try:
+                    from scipy.spatial.distance import cosine
+                    target_vec = json.loads(vec_raw)
+                    sim = 1 - cosine(query_vec, target_vec)  # ← 外で計算したものを使う
+                    vec_s = max(0, sim) * 30
+                except:
+                    pass
+
             return kw_s + vec_s
 
-        # 全行に対してスコアリングを実行
         df['total_score'] = df.apply(_calculate_score, axis=1)
-        # スコアが高い順（降順）に並び替える
         df = df.sort_values('total_score', ascending=False)
-        
+
     else:
-        # クエリがない場合は、全店舗 0 点とする
         df['total_score'] = 0
 
     return df
@@ -349,10 +329,6 @@ def save_shop_to_db(shop):
     try:
         # --- 【追加：ベクトル化処理】（修正箇所1） ---
         summary_text = shop.get('summary', '')
-        # AIがテキストを数値のリストに変換
-        summary_vector = model.encode(summary_text)
-        # SQLite保存用にバイナリデータへ変換（BLOB形式）
-        vector_blob = summary_vector.astype(np.float32).tobytes()
 
         # すでに同じホットペッパーURLがあるか確認
         cursor.execute("SELECT id FROM shops WHERE hotpepper_url = ?", (shop.get('hotpepper_url'),))
