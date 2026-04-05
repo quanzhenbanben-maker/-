@@ -337,17 +337,6 @@ def enrich_shop_data(shop):
             
     return shop
 
-import numpy as np
-from sentence_transformers import SentenceTransformer
-import sqlite3
-
-# --- ファイル上部で一度だけ定義 ---
-@st.cache_resource
-def load_embed_model():
-    # 日本語の文章をベクトル（数値）に変換するAIモデル
-    return SentenceTransformer('cl-nagoya/sup-simcse-ja-base')
-
-model = load_embed_model()
 
 def save_shop_to_db(shop):
     # 1. 戻り値用の変数を共通化する
@@ -1183,73 +1172,53 @@ with left_col:
         if st.button("＋ 店舗を登録する", use_container_width=True, key="register_sidebar"):
             st.session_state['show_register'] = True
 
-with right_col:
     # ============================================================
     # [C担当] 店舗カード表示デザイン
     # ============================================================
-   # ============================================================
-# [STEP 4 & 5] ハイブリッド検索と動的ソートの統合
-# ============================================================
-
-# 1. DBから基本条件で絞り込み（Filter）
-p = st.session_state.filter_params
-shops_df = load_filtered_shops(
-    area=p['area'],
-    max_budget=p['budget'],
-    genre=p['genre'],
-    has_private_room=p['has_room'],
-    is_nomihodai=p['nomihodai'],
-    is_smoking=p['smoking'],
-    purposes=p['purposes'],
-    query=p['query']
-)
-
-# 重複削除
-if not shops_df.empty:
+with right_col:
+    p = st.session_state.filter_params
+    shops_df = load_filtered_shops(
+        area=p['area'],
+        max_budget=p['budget'],
+        genre=p['genre'],
+        has_private_room=p['has_room'],
+        is_nomihodai=p['nomihodai'],
+        is_smoking=p['smoking'],
+        purposes=p['purposes'],
+        query=p['query']
+    )
     shops_df = shops_df.drop_duplicates(subset='id')
 
-# 2. 並び替えロジック（ここがハイブリッド検索の核心）
-if not shops_df.empty:
-    # --- A: キーワード入力がある場合 (ハイブリッドスコアリング優先) ---
-    if p['query']:
-        with st.spinner("AIが最適な順に並び替えています..."):
-            # クエリをベクトル化（modelは事前に定義済みの前提）
-            q_vec = model.encode(p['query']) 
-            
-            # 各行に対してスコア算出（calc_hybrid_score関数を呼び出し）
-            shops_df['match_score'] = shops_df.apply(
-                lambda r: calc_hybrid_score(r, p['query'], q_vec), axis=1
-            )
-            
-            # スコア順にソート（0〜100点満点）
-            shops_df = shops_df.sort_values('match_score', ascending=False)
-            st.caption(f"💡 『{p['query']}』に対するAIマッチ度順で表示中")
+    if not shops_df.empty:
+        if p['query']:
+            # キーワードあり → ベクトル検索スコア順
+            pass  # load_filtered_shops内でスコア付き済み
+        else:
+            # キーワードなし → 従来のソート
+            if sort == "Google評価順":
+                shops_df = shops_df.sort_values('google_rating', ascending=False)
+            elif sort == "予算が安い順":
+                shops_df = shops_df.sort_values('budget_night', ascending=True)
+            elif sort == "レビューが多い順":
+                conn = sqlite3.connect('nomikai_kanji.db')
+                rev_counts = pd.read_sql(
+                    "SELECT shop_id, COUNT(*) as cnt FROM comments GROUP BY shop_id", conn
+                )
+                conn.close()
+                shops_df = shops_df.merge(rev_counts, left_on='id', right_on='shop_id', how='left')
+                shops_df['cnt'] = shops_df['cnt'].fillna(0)
+                shops_df = shops_df.drop_duplicates(subset='id')
+                shops_df = shops_df.sort_values('cnt', ascending=False)
 
-    # --- B: キーワードがない場合 (従来のソート) ---
+    if p['area'] and not shops_df.empty:
+        shops_df = get_walk_minutes(p['area'], shops_df)
+
+    if shops_df.empty:
+        st.info("条件に合うお店が見つかりませんでした。条件を緩めて再検索してください。")
     else:
-        if sort == "Google評価順":
-            shops_df = shops_df.sort_values('google_rating', ascending=False)
-        elif sort == "予算が安い順":
-            shops_df = shops_df.sort_values('budget_night', ascending=True)
-        elif sort == "レビューが多い順":
-            # レビュー数でのソート（外部結合してカウント）
-            conn = sqlite3.connect('nomikai_kanji.db')
-            rev_counts = pd.read_sql("SELECT shop_id, COUNT(*) as cnt FROM comments GROUP BY shop_id", conn)
-            conn.close()
-            shops_df = shops_df.merge(rev_counts, left_on='id', right_on='shop_id', how='left')
-            shops_df['cnt'] = shops_df['cnt'].fillna(0)
-            shops_df = shops_df.sort_values('cnt', ascending=False)
+        st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
 
-# 3. 徒歩分数の計算（エリア指定がある場合）
-if p['area'] and not shops_df.empty:
-    shops_df = get_walk_minutes(p['area'], shops_df)
-
-# 4. 最終表示
-if shops_df.empty:
-    st.info("条件に合うお店が見つかりませんでした。条件を緩めて再検索してください。")
-else:
-    st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
-    
+        
     # --- ここから店舗カードのループ表示 ---
     # (既存の st.container を使った表示コードへ続く)
     # ============================================================
