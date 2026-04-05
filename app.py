@@ -150,13 +150,15 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
         # 目的が複数ある場合に対応 (例: 接待 OR 会食)
         purpose_queries = []
         for p in purposes:
+            # ホットペッパーのキャッチコピーから
             purpose_queries.append("catch LIKE ?")
             params.append(f"%{p}%")
-        
-        # 括弧で囲んで、他の条件(予算など)とANDで繋ぐ
+            # 社員レビューのpurposeから
+            purpose_queries.append(f"id IN (SELECT shop_id FROM comments WHERE purpose = ?)")
+            params.append(p)
         sql_query += " AND (" + " OR ".join(purpose_queries) + ")"
 
-    # 【追加：ココ！】キーワード検索
+    # キーワード検索
     if query:
         sql_query += """
             AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
@@ -1369,7 +1371,7 @@ with right_col:
                     """, unsafe_allow_html=True)
 
                     # 間違えたレビューは修正できるように
-            if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
+                    if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
                         st.session_state['rv_shop_id']    = int(shop['id'])
                         st.session_state['rv_shop_name']  = shop['name']
                         st.session_state['rv_edit_id']    = int(row['id'])      # 編集対象のレビューID
