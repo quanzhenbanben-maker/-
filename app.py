@@ -9,7 +9,7 @@ from openai import OpenAI
 import googlemaps
 import folium
 from streamlit_folium import st_folium
-
+import math
 
 
 load_dotenv() #.envを読み込み
@@ -77,7 +77,7 @@ st.markdown("""
     font-size: 13px;
 }
 .review-meta {
-    font-size: 11px;
+    font-size: 15px;
     color: #AAA;
     margin-top: 4px;
 }
@@ -87,6 +87,94 @@ st.markdown("""
 # ============================================================
 # DB接続
 # ============================================================
+# --- 以下の 30行を関数の定義エリア（20行目付近〜）に追加 ---
+def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai, is_smoking, query=None, purposes=None):
+    """
+    SQLのWHERE句を使って、DB側で事前に絞り込む
+    """
+    import sqlite3
+    import pandas as pd
+    
+    conn = sqlite3.connect('nomikai_kanji.db')
+    
+    # 基本のSELECT文（予算は必須条件）
+    sql_query = "SELECT * FROM shops WHERE budget_night <= ?"
+    params = [max_budget]
+    
+    # エリア（部分一致）
+    if area:
+        try:
+            search_word = area if area.endswith("駅") else area + " 駅"
+            geo = gmaps.geocode(search_word)
+            if not geo:                        
+                geo = gmaps.geocode(area) 
+            if geo:
+                center_lat = geo[0]['geometry']['location']['lat']
+                center_lng = geo[0]['geometry']['location']['lng']
+                # 半径3.0km以内（度数で約0.0135）
+                radius_deg_lat = 3.0 / 111.0
+                radius_deg_lng = 3.0 / (111.0 * math.cos(math.radians(center_lat)))
+                sql_query += " AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?"
+                params.append(center_lat - radius_deg_lat)
+                params.append(center_lat + radius_deg_lat)
+                params.append(center_lng - radius_deg_lng)
+                params.append(center_lng + radius_deg_lng)
+            else:
+                # Geocodingで見つからない場合は部分一致にフォールバック
+                sql_query += " AND address LIKE ?"
+                params.append(f"%{area}%")
+        except Exception:
+            sql_query += " AND address LIKE ?"
+            params.append(f"%{area}%")
+        
+    # ジャンル
+    if genre and genre != "すべて":
+        sql_query += " AND genre = ?"
+        params.append(genre)
+        
+    # 個室あり
+    if has_private_room:
+        sql_query += " AND has_private_room = 1"
+        
+    # 飲み放題あり
+    if is_nomihodai:
+        sql_query += " AND is_nomihodai = 1"
+        
+    # 喫煙設定
+    if is_smoking is not None:
+        sql_query += " AND is_smoking = ?"
+        params.append(is_smoking)
+
+    # 目的
+    if purposes:
+        # 目的が複数ある場合に対応 (例: 接待 OR 会食)
+        purpose_queries = []
+        for p in purposes:
+            purpose_queries.append("catch LIKE ?")
+            params.append(f"%{p}%")
+        
+        # 括弧で囲んで、他の条件(予算など)とANDで繋ぐ
+        sql_query += " AND (" + " OR ".join(purpose_queries) + ")"
+
+    # 【追加：ココ！】キーワード検索
+    if query:
+        sql_query += """
+            AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
+            OR id IN (
+                SELECT shop_id FROM comments WHERE review LIKE ?
+            ))
+        """
+        params.append(f"%{query}%")
+        params.append(f"%{query}%")
+        params.append(f"%{query}%")
+        params.append(f"%{query}%")
+        params.append(f"%{query}%")
+
+    # SQL実行
+    df = pd.read_sql(sql_query, conn, params=params)
+    conn.close()
+    return df
+
 def load_shops():  #全店舗データを読み込む
     try:
         conn = sqlite3.connect('nomikai_kanji.db')
@@ -348,8 +436,32 @@ def hybrid_search(query, shops_df, budget=None, area=None,
 
 
 def get_walk_minutes(area, shops_df):
-    pass #pass は「中身は空だけどエラーにしない」という意味。実装するときに pass を削除して中身を書いてって
-
+    if not area or shops_df.empty:
+        return shops_df
+    
+    try:
+        results = []
+        for _, shop in shops_df.iterrows():
+            # Google Maps で徒歩時間を取得
+            result = gmaps.distance_matrix(
+                origins=[area],
+                destinations=[shop['address']],
+                mode="walking",
+                language="ja"
+            )
+            element = result['rows'][0]['elements'][0]
+            if element['status'] == 'OK':
+                minutes = element['duration']['value'] // 60  # 秒→分
+            else:
+                minutes = 9999  # 取得失敗は末尾に
+            results.append(minutes)
+        
+        shops_df = shops_df.copy()
+        shops_df['walk_minutes'] = results
+        shops_df = shops_df.sort_values('walk_minutes')
+        return shops_df
+    except Exception:
+        return shops_df
 
 # ============================================================
 # [C担当] レビュー投稿ダイアログ
@@ -897,23 +1009,10 @@ with col_img:
 
 
 # ============================================================
-# [C担当] 検索バーデザイン
+# [C担当] 検索バーデザイン➡サイドバーに検索機能を集約しました
 # ============================================================
 # 余白
 st.markdown("<div style='margin: 60px 0'></div>", unsafe_allow_html=True)
-
-# 枠で囲ってわかりやすくしてみた
-with st.container(border=True):
-    search_col, btn_col = st.columns([6, 1])
-    with search_col:
-        query = st.text_input(
-            "",
-            placeholder="例：新宿　個室　居酒屋",
-            label_visibility="collapsed"
-     )
-        st.caption("⚡ キーワードを入力してください")
-    with btn_col:
-        search_btn = st.button("🔍 お店を探す", use_container_width=True, type="primary")
 
 # 余白
 st.markdown("<div style='margin: 50px 0'></div>", unsafe_allow_html=True)
@@ -930,43 +1029,57 @@ if review_hero or st.session_state.get('show_review'):
     review_dialog()
 
 
-# ============================================================
-# [B担当] 検索・フィルター処理
-# ============================================================
-# 検索ボタンまたは絞り込みボタンが押されたときに呼ぶ
-
-
-
 
 # ============================================================
 # [C担当] 絞り込み条件 + 店舗カード（左右レイアウト）
 # ============================================================
 
 left_col, right_col = st.columns([1, 3])
+# left_col の前に追加
+if 'filter_params' not in st.session_state:
+    st.session_state.filter_params = {
+        'area': '', 'budget': 10000, 'genre': 'すべて',
+        'has_room': False, 'nomihodai': False, 'smoking': None,
+        'purposes': [], 'query': ''
+    }
+
 with left_col:
-    with st.container(border=True):  # 外枠で囲む
-        # 本当は背景色も変えたかったけどstreamlitは厳しいので諦め…
-        st.markdown("**絞り込み条件**")
+    with st.container(border=True):
+        st.markdown("**検索条件**")
+        
+        # 【修正点1】queryという変数を作る（今は存在しないため）
+        query = st.text_input("🔍 キーワード検索", placeholder="店名や料理名など")
+        
         area = st.text_input("📍 エリア・駅名", placeholder="例：新橋、渋谷 など")
         budget = st.slider(
             "¥ 最大予算（夜・一人あたり）",
             min_value=3000, max_value=15000,
             value=10000, step=500, format="¥%d"
         )
+
+        # 【修正点2】sortをここで先に作る（使う前に準備する必要があるため）
+        sort = st.selectbox(
+            "並び替え",
+            ["Google評価順", "予算が安い順", "レビューが多い順"]
+        )
+
         st.markdown("**🎯 目的**")
         purpose_options = ["接待", "会食", "会社の飲み会", "プライベート"]
-        purposes = [p for p in purpose_options
-                    if st.checkbox(p, key=f"purpose_{p}")]
+        # 変数名を selected_purposes にし、選択されたリストを作成
+        selected_purposes = [p for p in purpose_options if st.checkbox(p, key=f"purpose_{p}")]
+        
         st.markdown("**🚪 個室・人数**")
         room = st.radio(
             "",
             ["こだわらない", "小人数（〜4名）", "大人数（5名〜）"],
             label_visibility="collapsed"
         )
-        nomihodai   = st.checkbox("🍺 飲み放題あり限定")
+        nomihodai = st.checkbox("🍺 飲み放題あり限定")
+        
         st.markdown("**🚬 喫煙**")
         non_smoking = st.checkbox("全席禁煙のみ")
         smoking_ok  = st.checkbox("喫煙可のみ")
+        
         genre = st.selectbox("🍽 ジャンル", [
             "すべて", "居酒屋", "ダイニングバー・バル", "創作料理",
             "和食", "洋食", "イタリアン・フレンチ", "中華",
@@ -974,34 +1087,73 @@ with left_col:
             "カラオケ・パーティ", "バー・カクテル", "ラーメン",
             "お好み焼き・もんじゃ", "カフェ・スイーツ", "その他グルメ",
         ])
-        filter_btn = st.button(
-            "この条件で絞り込む",
-            use_container_width=True,
-            type="primary"
-        )
+        
+        filter_btn = st.button("お店を探す", use_container_width=True, type="primary")
+        if filter_btn:
+            smoke_val = None
+            if non_smoking: smoke_val = 0
+            if smoking_ok:  smoke_val = 1
+            has_room_flag = True if "名" in room else False
+
+            st.session_state.filter_params = {
+                'area': area, 'budget': budget, 'genre': genre,
+                'has_room': has_room_flag, 'nomihodai': nomihodai,
+                'smoking': smoke_val, 'purposes': selected_purposes,
+                'query': query
+            }
         st.divider()
         if st.button("＋ 店舗を登録する", use_container_width=True, key="register_sidebar"):
             st.session_state['show_register'] = True
-
 
 with right_col:
     # ============================================================
     # [C担当] 店舗カード表示デザイン
     # ============================================================
-    shops_df = load_shops()
+    # --- SQLによる絞り込み処理 (Step 1) ---
+    # 喫煙フラグの整理（チェックボックスの状態から判定）
+    smoke_val = None
+    if non_smoking: smoke_val = 0 # 禁煙のみ
+    if smoking_ok:  smoke_val = 1 # 喫煙可のみ
+    
+    # 個室フラグ（ラジオボタンで「こだわらない」以外が選ばれたらTrue）
+    has_room_flag = True if "名" in room else False
+
+    # DBから条件に合うものだけを直接ロード
+    p = st.session_state.filter_params
+    shops_df = load_filtered_shops(
+        area=p['area'],
+        max_budget=p['budget'],
+        genre=p['genre'],
+        has_private_room=p['has_room'],
+        is_nomihodai=p['nomihodai'],
+        is_smoking=p['smoking'],
+        purposes=p['purposes'],
+        query=p['query']
+    )
+    if area:
+        shops_df = get_walk_minutes(area, shops_df)
+    # ソート機能
+    if not shops_df.empty:
+        if sort == "Google評価順":
+            shops_df = shops_df.sort_values('google_rating', ascending=False)
+        elif sort == "予算が安い順":
+            shops_df = shops_df.sort_values('budget_night', ascending=True)
+        elif sort == "レビューが多い順":
+            # レビュー件数を集計してソート
+            conn = sqlite3.connect('nomikai_kanji.db')
+            review_counts = pd.read_sql(
+                "SELECT shop_id, COUNT(*) as review_count FROM comments GROUP BY shop_id",
+                conn
+            )
+            conn.close()
+            shops_df = shops_df.merge(review_counts, left_on='id', right_on='shop_id', how='left')
+            shops_df['review_count'] = shops_df['review_count'].fillna(0)
+            shops_df = shops_df.sort_values('review_count', ascending=False)
 
     if shops_df.empty:
         st.info("まだ店舗が登録されていません。「店舗を登録する」ボタンから登録してください。")
     else:
-        result_col, sort_col = st.columns([3, 1])
-        with result_col:
-            st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
-        with sort_col:
-            sort = st.selectbox(
-                "",
-                ["Google評価順", "予算が安い順", "レビューが多い順"],
-                label_visibility="collapsed"
-            )
+        st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
 
    
     # ============================================================
@@ -1059,13 +1211,6 @@ with right_col:
     else:
         st.caption("📍 店舗が登録されると地図が表示されます")
    
-
-    #============================================================
-    # [B担当] ソート処理を実装する(Google評価順", "予算が安い順", "レビューが多い順)
-    #============================================================
-
-
-
 
 
     # ページネーション
@@ -1195,12 +1340,19 @@ with right_col:
 
             #　レビューコメントの表示について
             if not comments_df.empty:
-                for _, row in comments_df.iterrows():
-                    try:
-                        rating_int = int(float(str(row['rating']).strip()))
-                    except (ValueError, TypeError):
-                        rating_int = 3
-                    stars = "★" * rating_int + "☆" * (5 - rating_int)
+                for _, row in comments_df.iterrows():  # 全件ループ
+                    rating_raw = str(row.get('rating', '0'))
+                    if '★' in rating_raw:
+                         # 「★」の数をカウントして数値にする
+                         r_val = rating_raw.count('★')
+                    else:
+                         # 「4.5」などの数値形式の場合に備えて通常の変換も試みる
+                         try:
+                             r_val = int(float(rating_raw))
+                         except ValueError:
+                             r_val = 0
+                    r_val = min(max(r_val, 0), 5)
+                    stars = "★" * r_val + "☆" * (5 - r_val)
                     st.markdown(f"""
                     <div class="review-box">
                         <div>
