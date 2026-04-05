@@ -10,7 +10,7 @@ import googlemaps
 import folium
 from streamlit_folium import st_folium
 import math
-
+import json
 
 load_dotenv() #.envを読み込み
 
@@ -157,11 +157,40 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
         sql_query += " AND (" + " OR ".join(purpose_queries) + ")"
 
     if query:
-        sql_query += """
-            AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
-            OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?))
-        """
-        params.extend([f"%{query}%"] * 5)
+        import json
+        from scipy.spatial.distance import cosine
+
+        # queryをベクトル化して意味検索
+        query_vec = get_embedding(query)
+        df_all = pd.read_sql("SELECT id, summary_vector FROM shops", conn)
+
+        def calc_similarity(row):
+            if not row.get('summary_vector'):
+                return 0
+            try:
+                vec = json.loads(row['summary_vector'])
+                return 1 - cosine(query_vec, vec)
+            except:
+                return 0
+
+        df_all['sim'] = df_all.apply(calc_similarity, axis=1)
+        similar_ids = df_all[df_all['sim'] > 0.75]['id'].tolist()
+
+        if similar_ids:
+            placeholders = ','.join(['?' for _ in similar_ids])
+            sql_query += f"""
+                AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
+                OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?)
+                OR id IN ({placeholders}))
+            """
+            params.extend([f"%{query}%"] * 5)
+            params.extend(similar_ids)
+        else:
+            sql_query += """
+                AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
+                OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?))
+            """
+            params.extend([f"%{query}%"] * 5)
 
     # SQL実行してデータを取得
     df = pd.read_sql(sql_query, conn, params=params)
@@ -372,8 +401,8 @@ def save_shop_to_db(shop):
             shop.get('is_smoking', 0),
             shop.get('is_barrier_free', 0),
             shop.get('google_rating', 0.0),
-            summary_text,
-            vector_blob # ここでAIスコア用のデータを保存
+            shop.get('summary', ''),
+            json.dumps(get_embedding(shop.get('summary', ''))) if shop.get('summary') else ''
         )
 
         cursor.execute(sql, values)
