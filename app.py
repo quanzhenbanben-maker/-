@@ -98,7 +98,7 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
     conn = sqlite3.connect('nomikai_kanji.db')
     
     # 基本のSELECT文（予算は必須条件）
-    sql_query = "SELECT * FROM shops WHERE budget_night <= ?"
+    sql_query = "SELECT * FROM shops WHERE CAST(budget_night AS INTEGER) <= ?"
     params = [max_budget]
     
     # エリア（部分一致）
@@ -123,7 +123,8 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
                 # Geocodingで見つからない場合は部分一致にフォールバック
                 sql_query += " AND address LIKE ?"
                 params.append(f"%{area}%")
-        except Exception:
+        except Exception as e:
+            st.error(f"Geocodingエラー: {e}")
             sql_query += " AND address LIKE ?"
             params.append(f"%{area}%")
         
@@ -1132,8 +1133,11 @@ with right_col:
         purposes=p['purposes'],
         query=p['query']
     )
+    shops_df = shops_df.drop_duplicates(subset='id')
+
     if area:
         shops_df = get_walk_minutes(area, shops_df)
+
     # ソート機能
     if not shops_df.empty:
         if sort == "Google評価順":
@@ -1150,6 +1154,7 @@ with right_col:
             conn.close()
             shops_df = shops_df.merge(review_counts, left_on='id', right_on='shop_id', how='left')
             shops_df['review_count'] = shops_df['review_count'].fillna(0)
+            shops_df = shops_df.drop_duplicates(subset='id')
             shops_df = shops_df.sort_values('review_count', ascending=False)
 
     if shops_df.empty:
