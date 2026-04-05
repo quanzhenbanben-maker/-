@@ -1,0 +1,24 @@
+diff a/app.py b/app.py	(rejected hunks)
+@@ -714,17 +714,13 @@
+ 
+         nickname = st.text_input("👤 あだ名 *", placeholder="例：さとう")
+ 
+-        
+-        rating_labels = ["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"]
+-        rating_label = st.radio(
++        rating = st.select_slider(
+             "⭐ 総合評価 *",
+-            rating_labels,
+-            index=2,  # デフォルト★★★
+-            horizontal=True
++            options=[1, 2, 3, 4, 5],
++            value=3,
++            format_func=lambda x: "★" * x + "☆" * (5 - x)
+         )
+-        # ラベルから数値に変換
+-        rating = rating_labels.index(rating_label) + 1
+-        
++
+         review = st.text_area(
+             "📝 レビュー本文 *",
+             placeholder="誰といった？食事の提供スピードは？トイレは清潔？会食向き？など、自由に！",

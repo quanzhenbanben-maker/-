@@ -87,6 +87,66 @@ st.markdown("""
 # ============================================================
 # DB接続
 # ============================================================
+# --- 以下の 30行を関数の定義エリア（20行目付近〜）に追加 ---
+def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai, is_smoking, query=None, purposes=None):
+    """
+    SQLのWHERE句を使って、DB側で事前に絞り込む
+    """
+    import sqlite3
+    import pandas as pd
+    
+    conn = sqlite3.connect('nomikai_kanji.db')
+    
+    # 基本のSELECT文（予算は必須条件）
+    sql_query = "SELECT * FROM shops WHERE budget_night <= ?"
+    params = [max_budget]
+    
+    # エリア（部分一致）
+    if area:
+        sql_query += " AND address LIKE ?"
+        params.append(f"%{area}%")
+        
+    # ジャンル
+    if genre and genre != "すべて":
+        sql_query += " AND genre = ?"
+        params.append(genre)
+        
+    # 個室あり
+    if has_private_room:
+        sql_query += " AND has_private_room = 1"
+        
+    # 飲み放題あり
+    if is_nomihodai:
+        sql_query += " AND is_nomihodai = 1"
+        
+    # 喫煙設定
+    if is_smoking is not None:
+        sql_query += " AND is_smoking = ?"
+        params.append(is_smoking)
+
+    # 【修正：ココ！】目的の絞り込み (descriptionを削除しました)
+    # 【修正後のコード】
+    if purposes:
+        # 目的が複数ある場合に対応 (例: 接待 OR 会食)
+        purpose_queries = []
+        for p in purposes:
+            purpose_queries.append("catch LIKE ?")
+            params.append(f"%{p}%")
+        
+        # 括弧で囲んで、他の条件(予算など)とANDで繋ぐ
+        sql_query += " AND (" + " OR ".join(purpose_queries) + ")"
+
+    # 【追加：ココ！】キーワード検索
+    if query:
+        sql_query += " AND (name LIKE ? OR catch LIKE ?)"
+        params.append(f"%{query}%")
+        params.append(f"%{query}%")
+
+    # SQL実行
+    df = pd.read_sql(sql_query, conn, params=params)
+    conn.close()
+    return df
+
 def load_shops():  #全店舗データを読み込む
     try:
         conn = sqlite3.connect('nomikai_kanji.db')
@@ -434,10 +494,18 @@ def review_dialog():
             value=edit_data.get('nickname', ''),
             placeholder="例：さとう")
 
-        rating = st.select_slider("⭐ 総合評価 *",
-            options=[1,2,3,4,5],
-            value=int(edit_data.get('rating', 3)),
-            format_func=lambda x: "★"*x+"☆"*(5-x))
+        rating_labels = ["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"]
+        # 編集モードのときは既存の評価を初期選択にする
+        default_index = int(edit_data.get('rating', 3)) - 1 if edit_data else 2
+
+        rating_label = st.radio(
+            "⭐ 総合評価 *",
+            rating_labels,
+            index=default_index,
+            horizontal=True
+        )
+        # ラベルから数値に変換（★の数を数える）
+        rating = rating_labels.index(rating_label) + 1
 
         review = st.text_area("📝 レビュー本文 *",
             value=edit_data.get('review', ''),
@@ -714,13 +782,17 @@ def register_dialog():
 
         nickname = st.text_input("👤 あだ名 *", placeholder="例：さとう")
 
-        rating = st.select_slider(
+        
+        rating_labels = ["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"]
+        rating_label = st.radio(
             "⭐ 総合評価 *",
-            options=[1, 2, 3, 4, 5],
-            value=3,
-            format_func=lambda x: "★" * x + "☆" * (5 - x)
+            rating_labels,
+            index=2,  # デフォルト★★★
+            horizontal=True
         )
-
+        # ラベルから数値に変換
+        rating = rating_labels.index(rating_label) + 1
+        
         review = st.text_area(
             "📝 レビュー本文 *",
             placeholder="誰といった？食事の提供スピードは？トイレは清潔？会食向き？など、自由に！",
@@ -870,24 +942,12 @@ with col_hero:
     </div>
     """, unsafe_allow_html=True)
 
-    hero_col1, hero_col2 , hero_col3 = st.columns([1, 1, 1])
+    hero_col1, hero_col2 = st.columns([1, 1])
     with hero_col1:
-        search_hero = st.button(
-            "🔍 お店を探す",
-            use_container_width=True,
-            type="primary"
-        )
+        register_hero = st.button("＋ 店舗を登録する", use_container_width=True)
     with hero_col2:
-        register_hero = st.button(
-            "＋ 店舗を登録する",
-            use_container_width=True
-        )
-    with hero_col3:
-        review_hero = st.button(
-            "✏️ レビューを書く",
-            use_container_width=True
-        )
-
+        review_hero = st.button("✏️ レビューを書く", use_container_width=True)
+    
 with col_img:
     st.image(
         "Gemini_Generated_Image_u7jbhtu7jbhtu7jb.png",
@@ -913,7 +973,7 @@ with st.container(border=True):
      )
         st.caption("⚡ キーワードを入力してください")
     with btn_col:
-        search_btn = st.button("🔍 検索", use_container_width=True, type="primary")
+        search_btn = st.button("🔍 お店を探す", use_container_width=True, type="primary")
 
 # 余白
 st.markdown("<div style='margin: 50px 0'></div>", unsafe_allow_html=True)
@@ -933,36 +993,41 @@ if review_hero or st.session_state.get('show_review'):
 # ============================================================
 # [B担当] 検索・フィルター処理
 # ============================================================
-# 検索ボタンまたは絞り込みボタンが押されたときに呼ぶ
-def apply_filters(df, query, area, budget, nomihodai, sort):
-    filtered_df = df.copy()
+# --- これを貼り付ける ---
+def load_filtered_shops(area="", max_budget=15000, genre="すべて", 
+                        has_private_room=False, is_nomihodai=False, 
+                        is_smoking=None, purposes=None):
+    import sqlite3
+    conn = sqlite3.connect('nomikai_kanji.db')
     
-    # キーワード検索（名前・住所・ジャンルから）
-    if query:
-        filtered_df = filtered_df[
-            filtered_df['name'].str.contains(query, na=False) |
-            filtered_df['address'].str.contains(query, na=False) |
-            filtered_df['genre'].str.contains(query, na=False)
-        ]
+    # 目的(purposes)が選ばれている時だけレビューテーブルと紐付ける
+    sql = "SELECT DISTINCT s.* FROM shops s"
+    if purposes:
+        sql += " INNER JOIN comments c ON s.id = c.shop_id"
     
-    # エリア検索
+    sql += " WHERE 1=1"
+    params = []
+
+    # 「接待」などの目的で絞り込み
+    if purposes:
+        placeholders = ', '.join(['?'] * len(purposes))
+        sql += f" AND c.purpose IN ({placeholders})"
+        params.extend(purposes)
+
+    # エリア・予算などの基本条件
     if area:
-        filtered_df = filtered_df[filtered_df['address'].str.contains(area, na=False)]
-        
-    # 予算フィルター（スライダーの値以下のものを抽出）
-    filtered_df = filtered_df[filtered_df['budget_night'] <= budget]
+        sql += " AND s.address LIKE ?"
+        params.append(f"%{area}%")
     
-    # 飲み放題
-    if nomihodai:
-        filtered_df = filtered_df[filtered_df['is_nomihodai'] == 1]
-        
-    # ソート処理
-    if sort == "Google評価順":
-        filtered_df = filtered_df.sort_values(by='google_rating', ascending=False)
-    elif sort == "予算が安い順":
-        filtered_df = filtered_df.sort_values(by='budget_night', ascending=True)
-        
-    return filtered_df
+    sql += " AND s.budget_night <= ?"
+    params.append(max_budget)
+
+    # ...（その他の条件：ジャンル・個室など）...
+    # ※前述の改善案のSQL部分をここに含めます
+
+    df = pd.read_sql(sql, conn, params=params)
+    conn.close()
+    return df
 
 # ============================================================
 # [C担当] 絞り込み条件 + 店舗カード（左右レイアウト）
@@ -992,8 +1057,8 @@ with left_col:
 
         st.markdown("**🎯 目的**")
         purpose_options = ["接待", "会食", "会社の飲み会", "プライベート"]
-        purposes = [p for p in purpose_options
-                    if st.checkbox(p, key=f"purpose_{p}")]
+        # 変数名を selected_purposes にし、選択されたリストを作成
+        selected_purposes = [p for p in purpose_options if st.checkbox(p, key=f"purpose_{p}")]
         
         st.markdown("**🚪 個室・人数**")
         room = st.radio(
@@ -1025,8 +1090,25 @@ with right_col:
     # ============================================================
     # [C担当] 店舗カード表示デザイン
     # ============================================================
-    all_shops = load_shops()
-    shops_df = apply_filters(all_shops, query, area, budget, nomihodai, sort)
+    # --- SQLによる絞り込み処理 (Step 1) ---
+    # 喫煙フラグの整理（チェックボックスの状態から判定）
+    smoke_val = None
+    if non_smoking: smoke_val = 0 # 禁煙のみ
+    if smoking_ok:  smoke_val = 1 # 喫煙可のみ
+    
+    # 個室フラグ（ラジオボタンで「こだわらない」以外が選ばれたらTrue）
+    has_room_flag = True if "名" in room else False
+
+    # DBから条件に合うものだけを直接ロード
+    shops_df = load_filtered_shops(
+    area=area,               # サイドバーの入力値
+    max_budget=budget,       # スライダーの数値
+    genre=genre,             # セレクトボックスの選択値
+    has_private_room=has_room_flag, # 1107行目で判定したTrue/False
+    is_nomihodai=nomihodai,  # チェックボックスのTrue/False
+    is_smoking=smoke_val,    # 1103行目で判定した0/1/None
+    purposes=selected_purposes
+)
 
     if shops_df.empty:
         st.info("まだ店舗が登録されていません。「店舗を登録する」ボタンから登録してください。")
@@ -1061,22 +1143,12 @@ with right_col:
             review_html = ""
             if not comments_df_map.empty:
                 r = comments_df_map.iloc[0]
-            try:
-                  # 1. 文字列に変換して前後の空白を消す
-                  raw_val = str(r.get('rating', 3)).strip()
-                
-                  # 2. "4.0" のような小数点文字列も扱えるよう一度 float にしてから int にする
-                  rating_int = int(float(raw_val))
-                
-                  # 3. 0〜5の範囲に収まるように制限（念のため）
-                  rating_int = max(0, min(5, rating_int))
-            except (ValueError, TypeError, KeyError):
-                  # データが壊れていたり空だったりしたら、デフォルトで「3」にする
-                  rating_int = 3
-
-                #   ★ と ☆ を生成
-            stars = "★" * rating_int + "☆" * (5 - rating_int)
-            review_html = f"""
+                try:
+                    rating_int = int(float(str(r['rating']).strip()))
+                except (ValueError, TypeError):
+                    rating_int = 3
+                stars = "★" * rating_int + "☆" * (5 - rating_int)
+                review_html = f"""
                 <hr style="margin:6px 0">
                 <div style="font-size:12px">
                     💬 <b>{r['nickname']}</b> {stars}<br>
@@ -1116,24 +1188,52 @@ with right_col:
 
 
 
-    for _, shop in shops_df.iterrows():
+    # ページネーション
+    ITEMS_PER_PAGE = 10
+    total = len(shops_df)
+    total_pages = (total + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 1
+
+    # ページ番号の表示・操作
+    page_col1, page_col2, page_col3 = st.columns([1, 2, 1])
+    with page_col1:
+        if st.button("← 前へ", disabled=st.session_state.current_page <= 1):
+            st.session_state.current_page -= 1
+    with page_col2:
+        st.markdown(
+            f"<div style='text-align:center'>{st.session_state.current_page} / {total_pages} ページ</div>",
+            unsafe_allow_html=True
+        )
+    with page_col3:
+        if st.button("次へ →", disabled=st.session_state.current_page >= total_pages):
+            st.session_state.current_page += 1
+
+    # 表示するデータを絞り込む
+    start = (st.session_state.current_page - 1) * ITEMS_PER_PAGE
+    end   = start + ITEMS_PER_PAGE
+    paged_df = shops_df.iloc[start:end]
+
+  
+    for _, shop in paged_df.iterrows():
         with st.container(border=True):
             img_col, info_col = st.columns([0.5, 2])
 
             with img_col:
                 # 左空白・画像・右空白の3列で中央揃え
-                    _, center, _ = st.columns([0.2, 4, 0.2])
-                    with center:
-                        if shop.get('photo_url'):
-                            st.image(shop['photo_url'], width=200)
-                        else:
-                            st.markdown("""
-                            <div style="height:90px; background:#F0F0F0; border-radius:8px;
-                                        display:flex; align-items:center; justify-content:center;
-                                        color:#BBB; font-size:12px">
-                                🏮 画像なし
-                            </div>
-                            """, unsafe_allow_html=True)
+                _, center, _ = st.columns([0.2, 4, 0.2])
+                with center:
+                    if shop.get('photo_url'):
+                        st.image(shop['photo_url'], width=200)
+                    else:
+                        st.markdown("""
+                        <div style="height:90px; background:#F0F0F0; border-radius:8px;
+                                    display:flex; align-items:center; justify-content:center;
+                                    color:#BBB; font-size:12px">
+                            🏮 画像なし
+                        </div>
+                        """, unsafe_allow_html=True)
 
             with info_col:
                 name_col, rating_col = st.columns([3, 1])
@@ -1216,8 +1316,19 @@ with right_col:
             #　レビューコメントの表示について
             if not comments_df.empty:
                 for _, row in comments_df.iterrows():  # 全件ループ
-                    stars = "★" * int(row['rating']) + "☆" * (5 - int(row['rating']))
-                    st.markdown(f"""
+                   rating_raw = str(row.get('rating', '0'))
+            if '★' in rating_raw:
+                 # 「★」の数をカウントして数値にする
+                 r_val = rating_raw.count('★')
+            else:
+                 # 「4.5」などの数値形式の場合に備えて通常の変換も試みる
+                 try:
+                     r_val = int(float(rating_raw))
+                 except ValueError:
+                     r_val = 0
+            r_val = min(max(r_val, 0), 5)
+            stars = "★" * r_val + "☆" * (5 - r_val)
+            st.markdown(f"""
                     <div class="review-box">
                         <div>
                             <strong>{row['nickname']}</strong>
@@ -1234,7 +1345,7 @@ with right_col:
                     """, unsafe_allow_html=True)
 
                     # 間違えたレビューは修正できるように
-                    if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
+            if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
                         st.session_state['rv_shop_id']    = int(shop['id'])
                         st.session_state['rv_shop_name']  = shop['name']
                         st.session_state['rv_edit_id']    = int(row['id'])      # 編集対象のレビューID
@@ -1254,4 +1365,19 @@ with right_col:
                 st.session_state['rv_shop_name'] = shop['name']   
                 st.session_state['rv_step']      = 2
                 st.session_state['show_review']  = True
- 
+    
+
+
+    # ページネーション
+    page_col1, page_col2, page_col3 = st.columns([1, 2, 1])
+    with page_col1:
+        if st.button("← 前へ", disabled=st.session_state.current_page <= 1, key="prev_bottom"):
+            st.session_state.current_page -= 1
+    with page_col2:
+        st.markdown(
+            f"<div style='text-align:center'>{st.session_state.current_page} / {total_pages} ページ</div>",
+            unsafe_allow_html=True
+        )
+    with page_col3:
+        if st.button("次へ →", disabled=st.session_state.current_page >= total_pages, key="next_bottom"):
+            st.session_state.current_page += 1
