@@ -88,78 +88,74 @@ st.markdown("""
 # DB接続
 # ============================================================
 # --- 以下の 30行を関数の定義エリア（20行目付近〜）に追加 ---
+import sqlite3
+import pandas as pd
+import numpy as np
+import sklearn.metrics.pairwise as pw
+import math
+from sentence_transformers import SentenceTransformer
+import streamlit as st
+
+# --- 1. AIモデルの準備（関数の「外」に置くのが鉄則です！） ---
+@st.cache_resource
+def load_embed_model():
+    # 日本語モデルを読み込む（起動時の1回だけで済むようになります）
+    return SentenceTransformer('cl-nagoya/sup-simcse-ja-base')
+
+model = load_embed_model()
+
+# --- 2. メインの関数 ---
+# --- 2. メインの関数 ---
 def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai, is_smoking, query=None, purposes=None):
     """
-    SQLのWHERE句を使って、DB側で事前に絞り込む
+    SQLで絞り込みを行い、さらにキーワードがある場合はAIでハイブリッドスコアリングを行う
     """
-    import sqlite3
-    import pandas as pd
-    
     conn = sqlite3.connect('nomikai_kanji.db')
     
-    # 基本のSELECT文（予算は必須条件）
+    # --- STEP 1: SQLによる物理的な絞り込み ---
     sql_query = "SELECT * FROM shops WHERE CAST(budget_night AS INTEGER) <= ?"
     params = [max_budget]
     
-    # エリア（部分一致）
+    # エリア検索 (Geocodingロジック)
     if area:
         try:
             search_word = area if area.endswith("駅") else area + " 駅"
             geo = gmaps.geocode(search_word)
-            if not geo:                        
-                geo = gmaps.geocode(area) 
+            if not geo: geo = gmaps.geocode(area) 
             if geo:
                 center_lat = geo[0]['geometry']['location']['lat']
                 center_lng = geo[0]['geometry']['location']['lng']
-                # 半径3.0km以内（度数で約0.0135）
                 radius_deg_lat = 3.0 / 111.0
                 radius_deg_lng = 3.0 / (111.0 * math.cos(math.radians(center_lat)))
                 sql_query += " AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?"
-                params.append(center_lat - radius_deg_lat)
-                params.append(center_lat + radius_deg_lat)
-                params.append(center_lng - radius_deg_lng)
-                params.append(center_lng + radius_deg_lng)
+                params.extend([center_lat - radius_deg_lat, center_lat + radius_deg_lat, 
+                               center_lng - radius_deg_lng, center_lng + radius_deg_lng])
             else:
-                # Geocodingで見つからない場合は部分一致にフォールバック
                 sql_query += " AND address LIKE ?"
                 params.append(f"%{area}%")
-        except Exception as e:
-            st.error(f"Geocodingエラー: {e}")
+        except:
             sql_query += " AND address LIKE ?"
             params.append(f"%{area}%")
         
-    # ジャンル
     if genre and genre != "すべて":
         sql_query += " AND genre = ?"
         params.append(genre)
         
-    # 個室あり
-    if has_private_room:
-        sql_query += " AND has_private_room = 1"
-        
-    # 飲み放題あり
-    if is_nomihodai:
-        sql_query += " AND is_nomihodai = 1"
-        
-    # 喫煙設定
+    if has_private_room: sql_query += " AND has_private_room = 1"
+    if is_nomihodai: sql_query += " AND is_nomihodai = 1"
     if is_smoking is not None:
         sql_query += " AND is_smoking = ?"
         params.append(is_smoking)
 
-    # 目的
     if purposes:
-        # 目的が複数ある場合に対応 (例: 接待 OR 会食)
         purpose_queries = []
         for p in purposes:
-            # ホットペッパーのキャッチコピーから
             purpose_queries.append("catch LIKE ?")
             params.append(f"%{p}%")
-            # 社員レビューのpurposeから
             purpose_queries.append(f"id IN (SELECT shop_id FROM comments WHERE purpose = ?)")
             params.append(p)
         sql_query += " AND (" + " OR ".join(purpose_queries) + ")"
 
-    # キーワード検索
     if query:
         import json
         from scipy.spatial.distance import cosine
@@ -196,12 +192,49 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
             """
             params.extend([f"%{query}%"] * 5)
 
-    # SQL実行
+    # SQL実行してデータを取得
     df = pd.read_sql(sql_query, conn, params=params)
     conn.close()
+
+    # --- STEP 2: AIによるハイブリッドスコアリング ---
+    if query and not df.empty:
+        # 検索クエリをベクトル（数値）に変換
+        query_vec = model.encode([query])
+
+        def _calculate_score(row):
+            # ① キーワード一致スコア (最大 70点)
+            kw_s = 0
+            q = query.lower()
+            if q in str(row.get('name','')).lower(): kw_s += 40
+            if q in str(row.get('genre','')).lower(): kw_s += 15
+            if q in str(row.get('catch','')).lower(): kw_s += 10
+            if q in str(row.get('address','')).lower(): kw_s += 5
+            kw_s = min(kw_s, 70)
+
+            # ② AI類似度スコア (最大 30点)
+            vec_s = 0
+            vec_raw = row.get('summary_vector')
+            if vec_raw and isinstance(vec_raw, (bytes, bytearray)):
+                # 保存されているバイナリを数値に戻して比較
+                target_vec = np.frombuffer(vec_raw, dtype=np.float32).reshape(1, -1)
+                sim = pw.cosine_similarity(query_vec, target_vec)[0][0]
+                vec_s = max(0, sim) * 30
+            
+            return kw_s + vec_s
+
+        # 全行に対してスコアリングを実行
+        df['total_score'] = df.apply(_calculate_score, axis=1)
+        # スコアが高い順（降順）に並び替える
+        df = df.sort_values('total_score', ascending=False)
+        
+    else:
+        # クエリがない場合は、全店舗 0 点とする
+        df['total_score'] = 0
+
     return df
 
-def load_shops():  #全店舗データを読み込む
+# --- 全店舗読み込み用 ---
+def load_shops():
     try:
         conn = sqlite3.connect('nomikai_kanji.db')
         df = pd.read_sql_query("SELECT * FROM shops", conn)
@@ -209,7 +242,6 @@ def load_shops():  #全店舗データを読み込む
         return df
     except Exception:
         return pd.DataFrame()
-
 def load_comments(shop_id): #特定の店舗のレビューを読み込む
     try:
         conn = sqlite3.connect('nomikai_kanji.db')
@@ -305,6 +337,17 @@ def enrich_shop_data(shop):
             
     return shop
 
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import sqlite3
+
+# --- ファイル上部で一度だけ定義 ---
+@st.cache_resource
+def load_embed_model():
+    # 日本語の文章をベクトル（数値）に変換するAIモデル
+    return SentenceTransformer('cl-nagoya/sup-simcse-ja-base')
+
+model = load_embed_model()
 
 def save_shop_to_db(shop):
     # 1. 戻り値用の変数を共通化する
@@ -315,6 +358,13 @@ def save_shop_to_db(shop):
     cursor = conn.cursor()
 
     try:
+        # --- 【追加：ベクトル化処理】（修正箇所1） ---
+        summary_text = shop.get('summary', '')
+        # AIがテキストを数値のリストに変換
+        summary_vector = model.encode(summary_text)
+        # SQLite保存用にバイナリデータへ変換（BLOB形式）
+        vector_blob = summary_vector.astype(np.float32).tobytes()
+
         # すでに同じホットペッパーURLがあるか確認
         cursor.execute("SELECT id FROM shops WHERE hotpepper_url = ?", (shop.get('hotpepper_url'),))
         existing_shop = cursor.fetchone()
@@ -323,6 +373,7 @@ def save_shop_to_db(shop):
         shop_id = existing_shop[0] if existing_shop else None
 
         # SQL文（INSERT OR REPLACE）
+        # ★末尾に summary_vector カラムを追加（修正箇所2）
         sql = """
         INSERT OR REPLACE INTO shops (
             id, name, address, catch, photo_url, budget_night, 
@@ -332,6 +383,7 @@ def save_shop_to_db(shop):
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         
+        # ★末尾に vector_blob を追加（修正箇所3）
         values = (
             shop_id,
             shop.get('name'),
@@ -356,8 +408,7 @@ def save_shop_to_db(shop):
         cursor.execute(sql, values)
         conn.commit()
 
-        # 3. 確定したIDをセット（ここが重要！）
-        # 上書きした場合は shop_id、新規なら cursor.lastrowid を代入
+        # 3. 確定したIDをセット
         if shop_id:
             target_id = shop_id
         else:
@@ -1136,57 +1187,71 @@ with right_col:
     # ============================================================
     # [C担当] 店舗カード表示デザイン
     # ============================================================
-    # --- SQLによる絞り込み処理 (Step 1) ---
-    # 喫煙フラグの整理（チェックボックスの状態から判定）
-    smoke_val = None
-    if non_smoking: smoke_val = 0 # 禁煙のみ
-    if smoking_ok:  smoke_val = 1 # 喫煙可のみ
-    
-    # 個室フラグ（ラジオボタンで「こだわらない」以外が選ばれたらTrue）
-    has_room_flag = True if "名" in room else False
+   # ============================================================
+# [STEP 4 & 5] ハイブリッド検索と動的ソートの統合
+# ============================================================
 
-    # DBから条件に合うものだけを直接ロード
-    p = st.session_state.filter_params
-    shops_df = load_filtered_shops(
-        area=p['area'],
-        max_budget=p['budget'],
-        genre=p['genre'],
-        has_private_room=p['has_room'],
-        is_nomihodai=p['nomihodai'],
-        is_smoking=p['smoking'],
-        purposes=p['purposes'],
-        query=p['query']
-    )
+# 1. DBから基本条件で絞り込み（Filter）
+p = st.session_state.filter_params
+shops_df = load_filtered_shops(
+    area=p['area'],
+    max_budget=p['budget'],
+    genre=p['genre'],
+    has_private_room=p['has_room'],
+    is_nomihodai=p['nomihodai'],
+    is_smoking=p['smoking'],
+    purposes=p['purposes'],
+    query=p['query']
+)
+
+# 重複削除
+if not shops_df.empty:
     shops_df = shops_df.drop_duplicates(subset='id')
 
-    if area:
-        shops_df = get_walk_minutes(area, shops_df)
+# 2. 並び替えロジック（ここがハイブリッド検索の核心）
+if not shops_df.empty:
+    # --- A: キーワード入力がある場合 (ハイブリッドスコアリング優先) ---
+    if p['query']:
+        with st.spinner("AIが最適な順に並び替えています..."):
+            # クエリをベクトル化（modelは事前に定義済みの前提）
+            q_vec = model.encode(p['query']) 
+            
+            # 各行に対してスコア算出（calc_hybrid_score関数を呼び出し）
+            shops_df['match_score'] = shops_df.apply(
+                lambda r: calc_hybrid_score(r, p['query'], q_vec), axis=1
+            )
+            
+            # スコア順にソート（0〜100点満点）
+            shops_df = shops_df.sort_values('match_score', ascending=False)
+            st.caption(f"💡 『{p['query']}』に対するAIマッチ度順で表示中")
 
-    # ソート機能
-    if not shops_df.empty:
+    # --- B: キーワードがない場合 (従来のソート) ---
+    else:
         if sort == "Google評価順":
             shops_df = shops_df.sort_values('google_rating', ascending=False)
         elif sort == "予算が安い順":
             shops_df = shops_df.sort_values('budget_night', ascending=True)
         elif sort == "レビューが多い順":
-            # レビュー件数を集計してソート
+            # レビュー数でのソート（外部結合してカウント）
             conn = sqlite3.connect('nomikai_kanji.db')
-            review_counts = pd.read_sql(
-                "SELECT shop_id, COUNT(*) as review_count FROM comments GROUP BY shop_id",
-                conn
-            )
+            rev_counts = pd.read_sql("SELECT shop_id, COUNT(*) as cnt FROM comments GROUP BY shop_id", conn)
             conn.close()
-            shops_df = shops_df.merge(review_counts, left_on='id', right_on='shop_id', how='left')
-            shops_df['review_count'] = shops_df['review_count'].fillna(0)
-            shops_df = shops_df.drop_duplicates(subset='id')
-            shops_df = shops_df.sort_values('review_count', ascending=False)
+            shops_df = shops_df.merge(rev_counts, left_on='id', right_on='shop_id', how='left')
+            shops_df['cnt'] = shops_df['cnt'].fillna(0)
+            shops_df = shops_df.sort_values('cnt', ascending=False)
 
-    if shops_df.empty:
-        st.info("まだ店舗が登録されていません。「店舗を登録する」ボタンから登録してください。")
-    else:
-        st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
+# 3. 徒歩分数の計算（エリア指定がある場合）
+if p['area'] and not shops_df.empty:
+    shops_df = get_walk_minutes(p['area'], shops_df)
 
-   
+# 4. 最終表示
+if shops_df.empty:
+    st.info("条件に合うお店が見つかりませんでした。条件を緩めて再検索してください。")
+else:
+    st.markdown(f"**{len(shops_df)}件**のお店が見つかりました")
+    
+    # --- ここから店舗カードのループ表示 ---
+    # (既存の st.container を使った表示コードへ続く)
     # ============================================================
     # [C担当] 地図を入れるなら（検索結果の最上部にまとめて表示させる）
     # ============================================================
