@@ -1370,7 +1370,7 @@ with right_col:
                     """, unsafe_allow_html=True)
 
                     # 間違えたレビューは修正できるように
-                    if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
+            if st.button("✏️ 編集", key=f"edit_btn_{row['id']}", use_container_width=False):
                         st.session_state['rv_shop_id']    = int(shop['id'])
                         st.session_state['rv_shop_name']  = shop['name']
                         st.session_state['rv_edit_id']    = int(row['id'])      # 編集対象のレビューID
