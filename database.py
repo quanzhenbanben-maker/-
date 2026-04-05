@@ -8,6 +8,7 @@ def create_table():
     cursor = conn.cursor()
 
     # 1. shopsテーブルの作成
+    # summary_vector を TEXT から BLOB に変更
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS shops (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,9 +30,16 @@ def create_table():
         is_smoking       INTEGER,
         is_barrier_free  INTEGER,
         summary          TEXT, 
-        summary_vector   TEXT
+        summary_vector   BLOB
     )
     ''')
+
+    # すでにテーブルが存在し、summary_vector が無い、もしくは TEXT型の場合の補填
+    try:
+        cursor.execute('ALTER TABLE shops ADD COLUMN summary_vector BLOB')
+    except sqlite3.OperationalError:
+        # すでにカラムが存在する場合は何もしない
+        pass
 
     # 2. commentsテーブルの作成
     cursor.execute('''
@@ -55,6 +63,5 @@ def create_table():
     conn.close()
     print("DBのテーブル作成・確認が完了しました")
 
-# ファイルが直接実行された時だけ動くようにする（app.pyから呼ぶときは動かない）
 if __name__ == "__main__":
     create_table()
