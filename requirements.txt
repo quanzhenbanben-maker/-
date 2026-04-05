@@ -8,3 +8,5 @@ folium
 streamlit-folium
 googlemaps
 scipy
+sentence-transformers
+scikit-learn
