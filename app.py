@@ -891,6 +891,7 @@ def register_dialog():
                 c1, c2 = st.columns(2)
 
 
+
                 # --- 予算表示のクレンジング処理 ---
                 budget_val = shop.get('budget_night')
             
