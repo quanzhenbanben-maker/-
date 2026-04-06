@@ -14,9 +14,17 @@ import json
 
 load_dotenv() #.envを読み込み
 
-HOTPEPPER_API_KEY   = os.getenv('HOTPEPPER_API_KEY',   '').strip()
-OPENAI_API_KEY      = os.getenv('OPENAI_API_KEY',      '').strip()
-GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '').strip()
+if 'GOOGLE_MAPS_API_KEY' in st.secrets:
+    # Streamlit Cloud環境の場合
+    HOTPEPPER_API_KEY   = st.secrets["HOTPEPPER_API_KEY"]
+    OPENAI_API_KEY      = st.secrets["OPENAI_API_KEY"]
+    GOOGLE_MAPS_API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
+else:
+    # ローカル環境の場合
+    load_dotenv()
+    HOTPEPPER_API_KEY   = os.getenv('HOTPEPPER_API_KEY',   '').strip()
+    OPENAI_API_KEY      = os.getenv('OPENAI_API_KEY',      '').strip()
+    GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '').strip()
 
 # ============================================================
 # [A担当] STEP1: APIクライアントの初期化
