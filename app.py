@@ -40,11 +40,6 @@ def fetch_hotpepper(shop_id):
     return response.json()
 
 # ============================================================
-# [B担当] STEP1: ベクトル検索用ライブラリの初期化
-# ============================================================
-
-
-# ============================================================
 # ページ設定（最初に書かないとエラーが出た！）
 # ============================================================
 st.set_page_config(
@@ -116,7 +111,8 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
             else:
                 sql_query += " AND address LIKE ?"
                 params.append(f"%{area}%")
-        except:
+        except Exception as e:
+            print(f"Geocoding error: {e}")
             sql_query += " AND address LIKE ?"
             params.append(f"%{area}%")
         
@@ -142,41 +138,76 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
     if query:
         import json
         from scipy.spatial.distance import cosine
+        # スペースで分割して複数キーワードに
+        split_keywords = query.split()
+        
+        # 1単語のときは類義語展開、複数単語はそのまま
+        if len(split_keywords) == 1:
+            keywords = expand_query_keywords(query)
+        else:
+            keywords = split_keywords
 
         # queryをベクトル化して意味検索
         query_vec = get_embedding(query)
         df_all = pd.read_sql("SELECT id, summary_vector FROM shops", conn)
 
         def calc_similarity(row):
-            if not row.get('summary_vector'):
+            vec_raw = row.get('summary_vector')
+            if vec_raw is None or vec_raw == '':  # ← 明示的に判定
                 return 0
             try:
-                vec = json.loads(row['summary_vector'])
+                vec = json.loads(vec_raw)
                 return 1 - cosine(query_vec, vec)
-            except:
+            except Exception as e:
+                print(f"Vector similarity error: {e}")
                 return 0
 
         df_all['sim'] = df_all.apply(calc_similarity, axis=1)
-        similar_ids = df_all[df_all['sim'] > 0.75]['id'].tolist()
+        similar_ids = df_all[df_all['sim'] > 0.6]['id'].tolist()  # 0.75→0.6に緩める
 
+        # ベクトル検索のIDはまとめて1回だけ追加
         if similar_ids:
             placeholders = ','.join(['?' for _ in similar_ids])
-            sql_query += f"""
-                AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
-                OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?)
-                OR id IN ({placeholders}))
-            """
-            params.extend([f"%{query}%"] * 5)
-            params.extend(similar_ids)
+            vector_condition = f"OR id IN ({placeholders})"
         else:
-            sql_query += """
-                AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
-                OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?))
-            """
-            params.extend([f"%{query}%"] * 5)
+            vector_condition = ""
+            
+        # 1単語（類義語展開済み）のときはOR、複数単語のときはAND
+        if len(split_keywords) == 1:
+            # 類義語はOR条件でまとめて1つのAND句にする
+            or_conditions = []
+            for kw in keywords:
+                kw_like = f"%{kw}%"
+                or_conditions.append("name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ? OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?)")
+                params.extend([kw_like] * 5)
+            sql_query += f" AND ({' OR '.join(or_conditions)} {vector_condition})"
+            if similar_ids:
+                params.extend(similar_ids)
+        else:
+            # 複数単語はAND条件
+            for kw in keywords:
+                kw_like = f"%{kw}%"
+                sql_query += f"""
+                    AND (name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ?
+                    OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?)
+                    {vector_condition})
+                """
+                params.extend([kw_like] * 5)
+                if similar_ids:
+                    params.extend(similar_ids)
 
     # SQL実行してデータを取得
     df = pd.read_sql(sql_query, conn, params=params)
+
+    # ベクトル検索でヒットした店をマージ（SQL絞り込みで弾かれた店を救済）
+    if query and similar_ids:
+        placeholders2 = ','.join(['?' for _ in similar_ids])
+        vector_df = pd.read_sql(
+            f"SELECT * FROM shops WHERE id IN ({placeholders2})",
+            conn, params=similar_ids
+        )
+        df = pd.concat([df, vector_df]).drop_duplicates(subset='id')
+
     conn.close()
 
     # --- STEP 2: AIによるハイブリッドスコアリング ---
@@ -186,11 +217,11 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
         def _calculate_score(row):
             kw_s = 0
             q = query.lower()
-            if q in str(row.get('name','')).lower(): kw_s += 40
+            if q in str(row.get('name','')).lower(): kw_s += 20
             if q in str(row.get('genre','')).lower(): kw_s += 15
             if q in str(row.get('catch','')).lower(): kw_s += 10
             if q in str(row.get('address','')).lower(): kw_s += 5
-            kw_s = min(kw_s, 70)
+            kw_s = min(kw_s, 50)
 
             vec_s = 0
             vec_raw = row.get('summary_vector')
@@ -199,9 +230,9 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
                     from scipy.spatial.distance import cosine
                     target_vec = json.loads(vec_raw)
                     sim = 1 - cosine(query_vec, target_vec)  # ← 外で計算したものを使う
-                    vec_s = max(0, sim) * 30
-                except:
-                    pass
+                    vec_s = max(0, sim) * 50
+                except Exception as e:
+                    print(f"Scoring error: {e}")
 
             return kw_s + vec_s
 
@@ -240,7 +271,7 @@ def save_comment(shop_id, nickname, visited_at, amount, headcount,      # レビ
                  rating, review, purpose, noise_level):
     conn = sqlite3.connect('nomikai_kanji.db')
     conn.execute("""
-        INSERT OR REPLACE INTO comments
+        INSERT INTO comments
         (shop_id, nickname, visited_at, amount_per_person, headcount,
          rating, review, purpose, noise_level)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -254,7 +285,7 @@ def save_comment(shop_id, nickname, visited_at, amount, headcount,      # レビ
 # ============================================================
 def fetch_hotpepper_by_url(url):
     # 1. URLから店舗IDを抜き出す
-    match = re.search(r'str(J\d+)/', url)
+    match = re.search(r'/str(J\d+)/', url)
     if not match:
         return None
     shop_id = match.group(1)
@@ -367,7 +398,7 @@ def save_shop_to_db(shop):
             shop.get('is_barrier_free', 0),
             shop.get('google_rating', 0.0),
             shop.get('summary', ''),
-            json.dumps(get_embedding(shop.get('summary', ''))) if shop.get('summary') else ''
+            json.dumps(get_embedding(shop.get('summary', '').strip())) if shop.get('summary', '').strip() else ''
         )
 
         cursor.execute(sql, values)
@@ -415,7 +446,8 @@ def generate_summary(reviews_text):
             )
             # 50文字の文章だけを返す
             return response.choices[0].message.content.strip()
-    except:
+    except Exception as e:
+        print(f"OpenAI API error: {e}")
         return "分析エラー"
 
 def get_embedding(text):
@@ -428,6 +460,31 @@ def get_embedding(text):
     )
     return response.data[0].embedding
 
+def expand_query_keywords(query):
+    """
+    検索キーワードをAIで類義語展開する
+    """
+    prompt = f"""
+以下の検索キーワードの類義語・関連語を5個以内で出してください。
+飲食店の雰囲気・特徴を表す言葉として自然なものにしてください。
+出力はカンマ区切りで単語のみ。説明不要。
+
+キーワード：{query}
+
+出力例：静か,落ち着いた,穏やか,しっとり,ゆったり
+"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = response.choices[0].message.content.strip()
+        keywords = [k.strip() for k in result.split(',')]
+        print(f"類義語展開: {keywords}")
+        return keywords
+    except Exception as e:
+        print(f"類義語展開エラー: {e}")
+        return [query]  # 失敗したら元のキーワードのみ
 
 def get_google_reviews(shop_name, address):
     """
@@ -1044,10 +1101,16 @@ with col_hero:
         review_hero = st.button("✏️ レビューを書く", use_container_width=True)
     
 with col_img:
-    st.image(
-        "Gemini_Generated_Image_u7jbhtu7jbhtu7jb.png",
-        use_container_width=True
-    )
+    if os.path.exists("Gemini_Generated_Image_u7jbhtu7jbhtu7jb.png"):
+        st.image("Gemini_Generated_Image_u7jbhtu7jbhtu7jb.png", use_container_width=True)
+    else:
+        st.markdown("""
+            <div style="height:300px; background:#F0F0F0; border-radius:12px;
+                        display:flex; align-items:center; justify-content:center;
+                        color:#BBB; font-size:48px">
+                🍺
+            </div>
+        """, unsafe_allow_html=True)
 
 
 
