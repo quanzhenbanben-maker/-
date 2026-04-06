@@ -82,6 +82,35 @@ st.markdown("""
 # ============================================================
 # DB接続
 # ============================================================
+@st.cache_data
+def expand_query_keywords(query):
+    """
+    検索キーワードをAIで類義語展開する
+    """
+    prompt = f"""
+以下の検索キーワードの類義語・関連語を5個以内で出してください。
+飲食店の検索キーワードとして自然なものにしてください。
+ジャンル名なら関連するジャンルや料理名、雰囲気の言葉なら類似した雰囲気の言葉を出してください。
+出力はカンマ区切りで単語のみ。説明不要。
+
+キーワード：{query}
+
+出力例（ジャンルの場合）：イタリアン・フレンチ,パスタ,ピザ,洋食,ビストロ
+出力例（雰囲気の場合）：静か,落ち着いた,穏やか,しっとり,ゆったり
+"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = response.choices[0].message.content.strip()
+        keywords = [k.strip() for k in result.split(',')]
+        print(f"類義語展開: {keywords}")
+        return keywords
+    except Exception as e:
+        print(f"類義語展開エラー: {e}")
+        return [query]
+    
 
 # --- 2. メインの関数 ---
 def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai, is_smoking, query=None, purposes=None):
@@ -178,8 +207,8 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
             or_conditions = []
             for kw in keywords:
                 kw_like = f"%{kw}%"
-                or_conditions.append("name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ? OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?)")
-                params.extend([kw_like] * 5)
+                or_conditions.append("name LIKE ? OR catch LIKE ? OR address LIKE ? OR summary LIKE ? OR genre LIKE ? OR id IN (SELECT shop_id FROM comments WHERE review LIKE ?)")
+                params.extend([kw_like] * 6) 
             sql_query += f" AND ({' OR '.join(or_conditions)} {vector_condition})"
             if similar_ids:
                 params.extend(similar_ids)
@@ -199,14 +228,17 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
     # SQL実行してデータを取得
     df = pd.read_sql(sql_query, conn, params=params)
 
+
     # ベクトル検索でヒットした店をマージ（SQL絞り込みで弾かれた店を救済）
     if query and similar_ids:
+        similar_ids = locals().get('similar_ids')
         placeholders2 = ','.join(['?' for _ in similar_ids])
         vector_df = pd.read_sql(
             f"SELECT * FROM shops WHERE id IN ({placeholders2})",
             conn, params=similar_ids
         )
         df = pd.concat([df, vector_df]).drop_duplicates(subset='id')
+        
 
     conn.close()
 
@@ -242,7 +274,7 @@ def load_filtered_shops(area, max_budget, genre, has_private_room, is_nomihodai,
     else:
         df['total_score'] = 0
 
-    return df
+    return df, locals().get('center_lat'), locals().get('center_lng')
 
 # --- 全店舗読み込み用 ---
 def load_shops():
@@ -314,7 +346,7 @@ def fetch_hotpepper_by_url(url):
         "summary": "",         # ← これを追加しておくと③の時に便利
         "hotpepper_url": url,
         "photo_url": s.get('photo', {}).get('pc', {}).get('l'),
-        "budget_night": s.get('budget', {}).get('average'),
+        "budget_night": s.get('budget_dinner', {}).get('average') or s.get('budget', {}).get('average'),
         "is_nomihodai": 1 if "あり" in s.get('free_drink', '') else 0,
         "genre": s.get('genre', {}).get('name'),
         "access": s.get('access'),
@@ -460,31 +492,6 @@ def get_embedding(text):
     )
     return response.data[0].embedding
 
-def expand_query_keywords(query):
-    """
-    検索キーワードをAIで類義語展開する
-    """
-    prompt = f"""
-以下の検索キーワードの類義語・関連語を5個以内で出してください。
-飲食店の雰囲気・特徴を表す言葉として自然なものにしてください。
-出力はカンマ区切りで単語のみ。説明不要。
-
-キーワード：{query}
-
-出力例：静か,落ち着いた,穏やか,しっとり,ゆったり
-"""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        result = response.choices[0].message.content.strip()
-        keywords = [k.strip() for k in result.split(',')]
-        print(f"類義語展開: {keywords}")
-        return keywords
-    except Exception as e:
-        print(f"類義語展開エラー: {e}")
-        return [query]  # 失敗したら元のキーワードのみ
 
 def get_google_reviews(shop_name, address):
     """
@@ -535,16 +542,21 @@ def hybrid_search(query, shops_df, budget=None, area=None,
     pass #pass は「中身は空だけどエラーにしない」という意味。実装するときに pass を削除して中身を書いてって
 
 
-def get_walk_minutes(area, shops_df):
+def get_walk_minutes(area, shops_df, center_lat=None, center_lng=None):
     if not area or shops_df.empty:
         return shops_df
+    
+    # 緯度経度があればそれを使う、なければエリア名で検索
+    if center_lat and center_lng:
+        origin = f"{center_lat},{center_lng}"
+    else:
+        origin = area
     
     try:
         results = []
         for _, shop in shops_df.iterrows():
-            # Google Maps で徒歩時間を取得
             result = gmaps.distance_matrix(
-                origins=[area],
+                origins=[origin],  # ← 緯度経度を使う
                 destinations=[shop['address']],
                 mode="walking",
                 language="ja"
@@ -558,7 +570,6 @@ def get_walk_minutes(area, shops_df):
         
         shops_df = shops_df.copy()
         shops_df['walk_minutes'] = results
-        shops_df = shops_df.sort_values('walk_minutes')
         return shops_df
     except Exception:
         return shops_df
@@ -1216,7 +1227,7 @@ with left_col:
     # ============================================================
 with right_col:
     p = st.session_state.filter_params
-    shops_df = load_filtered_shops(
+    shops_df, center_lat, center_lng = load_filtered_shops(
         area=p['area'],
         max_budget=p['budget'],
         genre=p['genre'],
@@ -1227,30 +1238,28 @@ with right_col:
         query=p['query']
     )
     shops_df = shops_df.drop_duplicates(subset='id')
+    shops_df = shops_df.reset_index(drop=True)
 
     if not shops_df.empty:
-        if p['query']:
-            # キーワードあり → ベクトル検索スコア順
-            pass  # load_filtered_shops内でスコア付き済み
-        else:
-            # キーワードなし → 従来のソート
-            if sort == "Google評価順":
-                shops_df = shops_df.sort_values('google_rating', ascending=False)
-            elif sort == "予算が安い順":
-                shops_df = shops_df.sort_values('budget_night', ascending=True)
-            elif sort == "レビューが多い順":
-                conn = sqlite3.connect('nomikai_kanji.db')
-                rev_counts = pd.read_sql(
-                    "SELECT shop_id, COUNT(*) as cnt FROM comments GROUP BY shop_id", conn
-                )
-                conn.close()
-                shops_df = shops_df.merge(rev_counts, left_on='id', right_on='shop_id', how='left')
-                shops_df['cnt'] = shops_df['cnt'].fillna(0)
-                shops_df = shops_df.drop_duplicates(subset='id')
-                shops_df = shops_df.sort_values('cnt', ascending=False)
+        if sort == "Google評価順":
+            shops_df = shops_df.sort_values('google_rating', ascending=False)
+        elif sort == "予算が安い順":
+            shops_df = shops_df[shops_df['budget_night'] > 0]
+            shops_df = shops_df.sort_values('budget_night', ascending=True)
+        elif sort == "レビューが多い順":
+            conn = sqlite3.connect('nomikai_kanji.db')
+            rev_counts = pd.read_sql(
+                "SELECT shop_id, COUNT(*) as cnt FROM comments GROUP BY shop_id", conn
+            )
+            conn.close()
+            shops_df = shops_df.merge(rev_counts, left_on='id', right_on='shop_id', how='left')
+            shops_df['cnt'] = shops_df['cnt'].fillna(0)
+            shops_df = shops_df.drop_duplicates(subset='id')
+            shops_df = shops_df.sort_values('cnt', ascending=False)
+        shops_df = shops_df.reset_index(drop=True) 
 
     if p['area'] and not shops_df.empty:
-        shops_df = get_walk_minutes(p['area'], shops_df)
+        shops_df = get_walk_minutes(p['area'], shops_df, center_lat, center_lng)
 
     if shops_df.empty:
         st.info("条件に合うお店が見つかりませんでした。条件を緩めて再検索してください。")
@@ -1381,9 +1390,9 @@ with right_col:
                 #============================================================
                 # [B担当] 徒歩分数の表示
                 #============================================================
-                
-
-
+                if shop.get('walk_minutes') and shop['walk_minutes'] != 9999:
+                    area_label = p['area'] if p['area'].endswith('駅') else p['area'] + '駅'
+                    st.caption(f"🚶 {area_label}から{int(shop['walk_minutes'])}分")
 
 
                 tags = []
